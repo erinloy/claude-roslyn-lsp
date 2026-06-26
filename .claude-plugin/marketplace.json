@@ -12,9 +12,9 @@
     {
       "name": "roslyn",
       "source": ".",
-      "description": "Gold-standard Roslyn C#/VB language server for Claude Code — analyzer shadow-copying (no build locks), native .slnx + .NET 10, built from source on device.",
+      "description": "Gold-standard Roslyn C#/VB language server for Claude Code — analyzer shadow-copying (no build locks), native .slnx + .NET 10, built from source on device — plus a Roslyn-powered refactoring MCP (solution-wide rename/find-references/format).",
       "category": "development",
-      "tags": ["csharp", "c#", "vb", "dotnet", "roslyn", "lsp", "language-server", "slnx", "net10"],
+      "tags": ["csharp", "c#", "vb", "dotnet", "roslyn", "lsp", "language-server", "slnx", "net10", "refactoring", "rename", "mcp"],
       "author": {
         "name": "Erin Loy",
         "email": "eloy@crazydogventures.com"

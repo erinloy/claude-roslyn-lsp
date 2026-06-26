@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- Targets net10 to match the SDK whose in-process MSBuild MSBuildWorkspace loads (MSBuild assemblies must not
+         out-rank the host runtime). RollForward lets it run on a newer runtime if present. -->
+    <TargetFramework>net10.0</TargetFramework>
+    <RollForward>LatestMajor</RollForward>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>ClaudeRoslynLsp.Mcp</AssemblyName>
+    <RootNamespace>ClaudeRoslynLsp.Mcp</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <!-- The Workspaces.MSBuild package brings a transitive Microsoft.Build.* (17.7.2, NU1903). MSBuildLocator loads the
+         INSTALLED SDK's (patched) MSBuild at runtime, so that vulnerable copy is never executed. Don't fail on it. -->
+    <NoWarn>$(NoWarn);NU1903</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The MCP protocol layer (stdio server + [McpServerTool] discovery). -->
+    <PackageReference Include="ModelContextProtocol" Version="0.4.0-preview.1" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="9.0.0" />
+
+    <!-- Roslyn as a library: open the solution, rename symbols, find references, format. The language-specific
+         *.Workspaces packages MUST be present so MSBuildWorkspace's MEF host registers the C#/VB language services
+         (otherwise: "the language 'C#' is not supported"). They transitively pull the compiler + Workspaces.Common
+         (Renamer, Formatter, SymbolFinder). -->
+    <PackageReference Include="Microsoft.Build.Locator" Version="1.9.1" />
+    <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="4.14.0" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="4.14.0" />
+    <PackageReference Include="Microsoft.CodeAnalysis.VisualBasic.Workspaces" Version="4.14.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- One source of truth for workspace discovery — shared with the bridge. -->
+    <Compile Include="../bridge/SolutionLocator.cs" Link="SolutionLocator.cs" />
+  </ItemGroup>
+
+</Project>

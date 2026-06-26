@@ -1,6 +1,8 @@
 # .NET build output
 bridge/bin/
 bridge/obj/
+mcp/bin/
+mcp/obj/
 
 # Runtime data (built bridge, downloaded Roslyn server, logs) — produced on device, never committed
 .data/
