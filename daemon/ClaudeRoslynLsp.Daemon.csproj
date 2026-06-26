@@ -4,6 +4,8 @@
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
     <RollForward>LatestMajor</RollForward>
+    <!-- ConsoleAppFramework v5's generated CLI uses C# 13 language features (ref/unsafe in async). -->
+    <LangVersion>13.0</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>ClaudeRoslynLsp.Daemon</AssemblyName>
@@ -11,6 +13,15 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <ServerGarbageCollection>true</ServerGarbageCollection>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Repo-standard CLI surface (Bitter uses it): zero-dependency source generator, AOT-safe, no runtime assembly.
+         It generates the arg parsing, help output, and a Ctrl-C/SIGTERM-wired CancellationToken from the signature. -->
+    <PackageReference Include="ConsoleAppFramework" Version="5.7.13">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
 
   <ItemGroup>
     <!-- One source of truth — reuse the verified bridge primitives (acquire LS, spawn, discover solution, LSP framing). -->

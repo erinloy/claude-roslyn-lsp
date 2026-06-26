@@ -9,6 +9,7 @@ Claude Code's C# LSP options (`csharp-ls`, OmniSharp) each load Roslyn analyzers
 This plugin brings that server to Claude Code, so you get:
 
 - **No build locks** — analyzers/generators are shadow-copied; rebuild your generator with the LSP running.
+- **Centralized — one server, shared.** A single per-workspace daemon owns the Roslyn workspace; every Claude instance is a thin client onto it. N instances cost **1× memory, not N×** (the per-instance-server blowup of `csharp-ls` / OmniSharp).
 - **Native `.slnx`** (the modern XML solution format) **and .NET 10**.
 - **C# *and* VB.NET** (`.cs`, `.csx`, `.vb`).
 - The full Roslyn feature set: diagnostics, code fixes/refactorings, rename, hover, go-to-def/impl, find-references, call hierarchy, workspace symbols.
@@ -17,25 +18,23 @@ This plugin brings that server to Claude Code, so you get:
 
 ## How it works
 
-The Roslyn server is **not standalone** — it expects a client (the C# Dev Kit) to tell it which workspace to load via a custom `solution/open` notification, and it ships only as platform NuGet packages. This plugin is a small **.NET bridge** that fills both gaps:
+The Roslyn server is **not standalone** — it expects a client (the C# Dev Kit) to tell it which workspace to load via a custom `solution/open` notification, and it ships only as platform NuGet packages. And running one server per editor instance loads the whole solution into memory once *per instance*. This plugin solves both with an **aspire-style client/server split**, built from source on your device (no prebuilt binary; the only download is Microsoft's server package):
 
-1. **Acquires** `Microsoft.CodeAnalysis.LanguageServer.<rid>` from nuget.org on first run (cached under the plugin data dir).
-2. **Spawns** it over stdio and **proxies** all LSP traffic byte-for-byte.
-3. After the client's `initialized`, **discovers** the `.slnx` / `.sln` (or loose `.csproj` / `.vbproj`) under the workspace root and sends the Roslyn `solution/open` (or `project/open`) notification — so the workspace actually loads.
-
-The bridge is **built from source on your device** by the launcher (no prebuilt binary is shipped); the only dependency it downloads is Microsoft's server package.
+- **`client/lsp-client.cs`** — a .NET 10 **file-based app** (`dotnet run --file`) that Claude Code spawns per instance. It is tiny: it derives a per-workspace pipe key, connects to the shared daemon (starting it, via mutex election, if none is running), then pumps bytes between Claude's stdio and the daemon's named pipe.
+- **`daemon/` (`ClaudeRoslynLsp.Daemon`)** — **one per workspace**, shared by every instance. It acquires `Microsoft.CodeAnalysis.LanguageServer.<rid>` from nuget.org (cached), spawns it, drives `solution/open`, and **multiplexes** many client sessions onto the one server (cached `initialize`, id-namespaced requests, ref-counted document opens). It idle-shuts-down when the last client leaves.
 
 ```
-client (Claude Code) ⟷ scripts/launch.sh ⟶ bridge (this repo) ⟷ Microsoft.CodeAnalysis.LanguageServer
-                                              ├─ acquire server (nuget.org, cached)
-                                              ├─ proxy LSP stdio
-                                              └─ drive solution/open
+Claude #1 ⟶ dotnet run --file lsp-client.cs ⟶┐
+Claude #2 ⟶ dotnet run --file lsp-client.cs ⟶┤ named pipe   ┌─ ONE daemon (per workspace)
+Claude #3 ⟶ dotnet run --file lsp-client.cs ⟶┴────────────▶ │   └─ ONE Microsoft.CodeAnalysis.LanguageServer
+                                                            │       (workspace loaded ONCE → 1× memory)
 ```
+
+The command Claude spawns is `dotnet` directly (not `bash a-script` — Claude Code's LSP/MCP host spawns the command with no shell, so a direct executable is required), and `.NET 10`'s file-based apps keep stdout clean for the JSON-RPC wire.
 
 ## Requirements
 
-- **.NET SDK 8.0+** on `PATH` for the LSP bridge. The **refactoring MCP needs the .NET 10 SDK** (it loads the SDK's in-process MSBuild). `dotnet --version` should work.
-- **bash** on `PATH` — present everywhere; on Windows this is **Git Bash** (ships with Git for Windows), which Claude Code already uses.
+- **.NET 10 SDK** on `PATH` (`dotnet --version` → `10.x`). Required for the file-based-app client (`dotnet run --file`) and for the refactoring MCP's in-process MSBuild.
 
 ## Install
 
@@ -48,7 +47,7 @@ From a running `claude`:
 
 (or `/plugin marketplace add https://github.com/erinloy/claude-roslyn-lsp.git`)
 
-Then restart Claude Code. **First launch builds the bridge and downloads the server (one-time, ~1–2 min);** subsequent launches are instant. If you run more than one C# LSP plugin, disable the others so only one claims `.cs`.
+Then restart Claude Code. **First launch builds the client + daemon and downloads the server (one-time, ~1–2 min);** subsequent launches connect to the already-running daemon instantly. If you run more than one C# LSP plugin, disable the others so only one claims `.cs`.
 
 > Claude Code's built-in LSP tool may need enabling — see [Piebald-AI/claude-code-lsps](https://github.com/Piebald-AI/claude-code-lsps) (`npx tweakcc --apply`) and Claude Code 2.1.50+.
 
@@ -88,11 +87,14 @@ prints the providers, code-action kinds, executable commands, and semantic-token
 ## Run / debug by hand
 
 ```bash
-# build + run the bridge directly (it logs to stderr and to <data>/bridge.log)
-dotnet run --project bridge/ClaudeRoslynLsp.Bridge.csproj -- --stdio
+# run the thin client (it starts the daemon if needed); set the workspace via env
+CLAUDE_ROSLYN_WORKSPACE_ROOT=/path/to/repo dotnet run --file client/lsp-client.cs
 
-# just pre-download the server
-dotnet run --project bridge/ClaudeRoslynLsp.Bridge.csproj -- --download
+# run the daemon directly (ConsoleAppFramework CLI — see --help)
+dotnet run --project daemon/ClaudeRoslynLsp.Daemon.csproj -- --root /path/to/repo
+
+# interrogate the server's runtime capabilities
+dotnet run --project bridge/ClaudeRoslynLsp.Bridge.csproj -- --capabilities
 
 # run the refactoring MCP server directly (stdio MCP)
 dotnet run --project mcp/ClaudeRoslynLsp.Mcp.csproj
@@ -104,23 +106,24 @@ dotnet run --project mcp/ClaudeRoslynLsp.Mcp.csproj
 .claude-plugin/
   plugin.json          # plugin manifest
   marketplace.json     # marketplace descriptor (install from git)
-.lsp.json              # LSP server config → scripts/launch.sh
-.mcp.json              # refactoring MCP config → scripts/launch-mcp.sh
-scripts/
-  launch.sh            # build-from-source (idempotent) then exec the bridge
-  launch-mcp.sh        # build-from-source (idempotent) then exec the MCP server
+.lsp.json              # LSP config → dotnet run --file client/lsp-client.cs
+.mcp.json              # refactoring MCP config → dotnet run --project mcp/…
 skills/
   roslyn-refactoring/  # when/how to use the refactoring tools
-bridge/                # the LSP .NET bridge (built on device)
-  Program.cs           # entry: acquire → proxy → drive solution/open (+ --capabilities)
+client/
+  lsp-client.cs        # file-based thin client: connect-or-start daemon, pipe⟷stdio
+daemon/                # the shared per-workspace server (ConsoleAppFramework CLI)
+  Program.cs           # acquire LS → multiplex clients → idle-shutdown
+  LspMultiplexer.cs    # one LS ⟷ many client sessions (id-namespacing, doc refcount)
+bridge/                # reused primitives + the --capabilities / --download tool
   RoslynAcquirer.cs    # download + cache the Roslyn server package
   RoslynServer.cs      # spawn the server (apphost else dotnet <dll>)
-  LspStdioProxy.cs     # stdio proxy + solution/open injection
-  CapabilitiesProbe.cs # --capabilities handshake + summary
   SolutionLocator.cs   # pick .slnx/.sln/.csproj for the workspace
+  PipeKey.cs           # per-workspace pipe name (client replicates it)
+  CapabilitiesProbe.cs # --capabilities handshake + summary
+  LspStdioProxy.cs     # legacy single-process stdio proxy (still used by --capabilities path)
   JsonRpc.cs           # Content-Length framing read/write
 mcp/                   # the refactoring MCP server (built on device)
-  Program.cs           # MSBuildLocator + MCP stdio host
   WorkspaceHost.cs     # warm MSBuildWorkspace (+ .slnx project loader)
   RefactorTools.cs     # rename / find-references / format tools
 ```
