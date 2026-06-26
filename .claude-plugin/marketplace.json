@@ -1,0 +1,42 @@
+{
+  "name": "claude-roslyn-lsp",
+  "owner": {
+    "name": "Erin Loy",
+    "email": "eloy@crazydogventures.com"
+  },
+  "metadata": {
+    "description": "The gold-standard Roslyn language server (the engine VS 2026 / C# Dev Kit run) as a Claude Code LSP plugin.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "roslyn",
+      "source": ".",
+      "description": "Gold-standard Roslyn C#/VB language server for Claude Code — analyzer shadow-copying (no build locks), native .slnx + .NET 10, built from source on device.",
+      "category": "development",
+      "tags": ["csharp", "c#", "vb", "dotnet", "roslyn", "lsp", "language-server", "slnx", "net10"],
+      "author": {
+        "name": "Erin Loy",
+        "email": "eloy@crazydogventures.com"
+      },
+      "license": "MIT",
+      "lspServers": {
+        "csharp": {
+          "command": "bash",
+          "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/launch.sh"],
+          "transport": "stdio",
+          "extensionToLanguage": {
+            ".cs": "csharp",
+            ".csx": "csharp",
+            ".vb": "vb"
+          },
+          "initializationOptions": {},
+          "settings": {},
+          "startupTimeout": 180000,
+          "shutdownTimeout": 15000,
+          "maxRestarts": 3
+        }
+      }
+    }
+  ]
+}

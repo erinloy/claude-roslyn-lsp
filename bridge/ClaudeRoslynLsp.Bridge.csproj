@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The claude-roslyn-lsp BRIDGE: a small stdio LSP proxy that makes Microsoft's Roslyn language server
+       (Microsoft.CodeAnalysis.LanguageServer) usable by a generic LSP client (Claude Code). It (1) acquires the
+       per-platform Roslyn server binary on first run, (2) spawns it over stdio, (3) proxies LSP traffic, and
+       (4) drives the Roslyn-specific solution/open notification that the server needs to actually load a workspace.
+       Builds from source on the device (no prebuilt binary shipped). net8.0 keeps the floor broad. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>ClaudeRoslynLsp.Bridge</AssemblyName>
+    <RootNamespace>ClaudeRoslynLsp.Bridge</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- One self-contained dll on disk; the launcher runs it via `dotnet <dll>`. -->
+    <RollForward>LatestMajor</RollForward>
+  </PropertyGroup>
+
+</Project>

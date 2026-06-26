@@ -1,0 +1,17 @@
+{
+  "csharp": {
+    "command": "bash",
+    "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/launch.sh"],
+    "transport": "stdio",
+    "extensionToLanguage": {
+      ".cs": "csharp",
+      ".csx": "csharp",
+      ".vb": "vb"
+    },
+    "initializationOptions": {},
+    "settings": {},
+    "startupTimeout": 180000,
+    "shutdownTimeout": 15000,
+    "maxRestarts": 3
+  }
+}

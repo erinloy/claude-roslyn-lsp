@@ -1,0 +1,12 @@
+{
+  "name": "roslyn",
+  "version": "0.1.0",
+  "description": "Gold-standard Roslyn C#/VB language server for Claude Code — analyzer shadow-copying (no build locks), native .slnx + .NET 10, built from source on device.",
+  "author": {
+    "name": "Erin Loy",
+    "email": "eloy@crazydogventures.com"
+  },
+  "repository": "https://github.com/erinloy/claude-roslyn-lsp",
+  "license": "MIT",
+  "keywords": ["csharp", "c#", "vb", "dotnet", "roslyn", "lsp", "language-server", "slnx", "net10"]
+}

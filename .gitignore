@@ -1,0 +1,11 @@
+# .NET build output
+bridge/bin/
+bridge/obj/
+
+# Runtime data (built bridge, downloaded Roslyn server, logs) — produced on device, never committed
+.data/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
