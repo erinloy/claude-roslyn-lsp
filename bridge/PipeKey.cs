@@ -4,9 +4,8 @@ using System.Text;
 namespace ClaudeRoslynLsp.Bridge;
 
 /// <summary>
-/// Derives the named-pipe identity that keys a shared daemon to a workspace. The file-based <c>lsp-client.cs</c>
-/// replicates this exact algorithm (it can't link this file), so any change here MUST be mirrored there — both sides
-/// must hash identically or a client won't find its daemon.
+/// Derives the named-pipe identity that keys a shared daemon to a workspace. Both the daemon and the client link this
+/// file, so they hash identically by construction — a client always finds its workspace's daemon.
 /// </summary>
 public static class PipeKey
 {

@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The thin per-instance LSP client. Built ONCE (by boot/ensure-built.ps1, run from the SessionStart hook) and
+       launched via `dotnet exec` — NEVER `dotnet run`. `dotnet run` rebuilds on every launch, and N Claude instances
+       launching the same shared cache copy concurrently race to build+lock the same output DLL → MSB3027 "build failed"
+       → the server never connects. Pre-building to a stable DLL and exec'ing it removes the build from the hot path
+       entirely: instant start, no lock, collision-free across any number of instances. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <!-- BCL-only (pipes, crypto). RollForward lets the net8 image run on the net10 runtime that ships with the SDK,
+         so no separate .NET 8 runtime install is required. -->
+    <RollForward>LatestMajor</RollForward>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>ClaudeRoslynLsp.Client</AssemblyName>
+    <RootNamespace>ClaudeRoslynLsp.Client</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- One source of truth for the pipe key — the client linked a copy when it was file-based; now it shares the real
+         bridge type so the hash can never drift from the daemon's. -->
+    <Compile Include="../bridge/PipeKey.cs" Link="PipeKey.cs" />
+  </ItemGroup>
+
+</Project>

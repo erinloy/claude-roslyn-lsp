@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/boot/ensure-built.ps1\" -Root \"${CLAUDE_PLUGIN_ROOT}\"",
+            "async": false
+          }
+        ]
+      }
+    ]
+  }
+}

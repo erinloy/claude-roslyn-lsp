@@ -23,7 +23,7 @@
       "lspServers": {
         "csharp": {
           "command": "dotnet",
-          "args": ["run", "--file", "${CLAUDE_PLUGIN_ROOT}/client/lsp-client.cs"],
+          "args": ["exec", "${CLAUDE_PLUGIN_ROOT}/client/bin/Release/net8.0/ClaudeRoslynLsp.Client.dll"],
           "transport": "stdio",
           "extensionToLanguage": {
             ".cs": "csharp",

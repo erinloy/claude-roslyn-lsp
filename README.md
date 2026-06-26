@@ -20,17 +20,19 @@ This plugin brings that server to Claude Code, so you get:
 
 The Roslyn server is **not standalone** — it expects a client (the C# Dev Kit) to tell it which workspace to load via a custom `solution/open` notification, and it ships only as platform NuGet packages. And running one server per editor instance loads the whole solution into memory once *per instance*. This plugin solves both with an **aspire-style client/server split**, built from source on your device (no prebuilt binary; the only download is Microsoft's server package):
 
-- **`client/lsp-client.cs`** — a .NET 10 **file-based app** (`dotnet run --file`) that Claude Code spawns per instance. It is tiny: it derives a per-workspace pipe key, connects to the shared daemon (starting it, via mutex election, if none is running), then pumps bytes between Claude's stdio and the daemon's named pipe.
+- **`client/` (`ClaudeRoslynLsp.Client`)** — a tiny per-instance client that Claude Code spawns. It derives a per-workspace pipe key, connects to the shared daemon (starting it, via mutex election, if none is running), then pumps bytes between Claude's stdio and the daemon's named pipe.
 - **`daemon/` (`ClaudeRoslynLsp.Daemon`)** — **one per workspace**, shared by every instance. It acquires `Microsoft.CodeAnalysis.LanguageServer.<rid>` from nuget.org (cached), spawns it, drives `solution/open`, and **multiplexes** many client sessions onto the one server (cached `initialize`, id-namespaced requests, ref-counted document opens). It idle-shuts-down when the last client leaves.
 
 ```
-Claude #1 ⟶ dotnet run --file lsp-client.cs ⟶┐
-Claude #2 ⟶ dotnet run --file lsp-client.cs ⟶┤ named pipe   ┌─ ONE daemon (per workspace)
-Claude #3 ⟶ dotnet run --file lsp-client.cs ⟶┴────────────▶ │   └─ ONE Microsoft.CodeAnalysis.LanguageServer
-                                                            │       (workspace loaded ONCE → 1× memory)
+Claude #1 ⟶ dotnet exec ClaudeRoslynLsp.Client.dll ⟶┐
+Claude #2 ⟶ dotnet exec ClaudeRoslynLsp.Client.dll ⟶┤ pipe   ┌─ ONE daemon (per workspace)
+Claude #3 ⟶ dotnet exec ClaudeRoslynLsp.Client.dll ⟶┴──────▶ │   └─ ONE Microsoft.CodeAnalysis.LanguageServer
+                                                             │       (workspace loaded ONCE → 1× memory)
 ```
 
-The command Claude spawns is `dotnet` directly (not `bash a-script` — Claude Code's LSP/MCP host spawns the command with no shell, so a direct executable is required), and `.NET 10`'s file-based apps keep stdout clean for the JSON-RPC wire.
+The command Claude spawns is `dotnet` directly (not `bash a-script` — Claude Code's LSP/MCP host spawns the command with no shell, so a direct executable is required).
+
+**Why `dotnet exec`, never `dotnet run`.** `dotnet run` *builds* on every launch. With many Claude instances launching the **same** shared plugin copy concurrently, they race to build and lock the **same** output DLL — and the loser dies with `MSB3027 / "The build failed."`, so its server never connects. (This is the same N-instances pathology the centralized daemon exists to avoid, reappearing at the build layer.) The cure is to **build once, then only ever execute**: a `SessionStart` hook runs [`boot/ensure-built.ps1`](boot/ensure-built.ps1), which builds the client, daemon, and MCP to their Release DLLs **once, under a machine-wide mutex** (concurrent first-launches collapse to a single build; the rest wait, then find the DLL already there). Every launch after that is a pure `dotnet exec` of the prebuilt DLL — instant, lock-free, and collision-free no matter how many instances start at once.
 
 ## Requirements
 
@@ -87,11 +89,14 @@ prints the providers, code-action kinds, executable commands, and semantic-token
 ## Run / debug by hand
 
 ```bash
+# build everything once (what the SessionStart hook runs); re-run any time after editing source
+pwsh -NoProfile -File boot/ensure-built.ps1 -Root .
+
 # run the thin client (it starts the daemon if needed); set the workspace via env
-CLAUDE_ROSLYN_WORKSPACE_ROOT=/path/to/repo dotnet run --file client/lsp-client.cs
+CLAUDE_ROSLYN_WORKSPACE_ROOT=/path/to/repo dotnet exec client/bin/Release/net8.0/ClaudeRoslynLsp.Client.dll
 
 # run the daemon directly (ConsoleAppFramework CLI — see --help)
-dotnet run --project daemon/ClaudeRoslynLsp.Daemon.csproj -- --root /path/to/repo
+dotnet exec daemon/bin/Release/net8.0/ClaudeRoslynLsp.Daemon.dll --root /path/to/repo
 
 # interrogate the server's runtime capabilities
 dotnet run --project bridge/ClaudeRoslynLsp.Bridge.csproj -- --capabilities
@@ -106,12 +111,17 @@ dotnet run --project mcp/ClaudeRoslynLsp.Mcp.csproj
 .claude-plugin/
   plugin.json          # plugin manifest
   marketplace.json     # marketplace descriptor (install from git)
-.lsp.json              # LSP config → dotnet run --file client/lsp-client.cs
-.mcp.json              # refactoring MCP config → dotnet run --project mcp/…
+.lsp.json              # LSP config → dotnet exec client/…/ClaudeRoslynLsp.Client.dll
+.mcp.json              # refactoring MCP config → dotnet exec mcp/…/ClaudeRoslynLsp.Mcp.dll
+hooks/
+  hooks.json           # SessionStart → boot/ensure-built.ps1 (build-once, serialized)
+boot/
+  ensure-built.ps1     # mutex-guarded build of client+daemon+mcp to Release DLLs (skip-if-fresh)
 skills/
   roslyn-refactoring/  # when/how to use the refactoring tools
 client/
-  lsp-client.cs        # file-based thin client: connect-or-start daemon, pipe⟷stdio
+  ClaudeRoslynLsp.Client.csproj
+  lsp-client.cs        # thin client: connect-or-start daemon, pipe⟷stdio (exec'd, never run)
 daemon/                # the shared per-workspace server (ConsoleAppFramework CLI)
   Program.cs           # acquire LS → multiplex clients → idle-shutdown
   LspMultiplexer.cs    # one LS ⟷ many client sessions (id-namespacing, doc refcount)
