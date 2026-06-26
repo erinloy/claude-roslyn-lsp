@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RollForward>LatestMajor</RollForward>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>ClaudeRoslynLsp.Daemon</AssemblyName>
+    <RootNamespace>ClaudeRoslynLsp.Daemon</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- One source of truth — reuse the verified bridge primitives (acquire LS, spawn, discover solution, LSP framing). -->
+    <Compile Include="../bridge/JsonRpc.cs" Link="JsonRpc.cs" />
+    <Compile Include="../bridge/SolutionLocator.cs" Link="SolutionLocator.cs" />
+    <Compile Include="../bridge/RoslynAcquirer.cs" Link="RoslynAcquirer.cs" />
+    <Compile Include="../bridge/RoslynServer.cs" Link="RoslynServer.cs" />
+    <Compile Include="../bridge/PipeKey.cs" Link="PipeKey.cs" />
+  </ItemGroup>
+
+</Project>

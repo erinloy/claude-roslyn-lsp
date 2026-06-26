@@ -3,6 +3,10 @@ bridge/bin/
 bridge/obj/
 mcp/bin/
 mcp/obj/
+daemon/bin/
+daemon/obj/
+client/bin/
+client/obj/
 
 # Runtime data (built bridge, downloaded Roslyn server, logs) — produced on device, never committed
 .data/

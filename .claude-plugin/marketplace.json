@@ -22,8 +22,8 @@
       "license": "MIT",
       "lspServers": {
         "csharp": {
-          "command": "bash",
-          "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/launch.sh"],
+          "command": "dotnet",
+          "args": ["run", "--file", "${CLAUDE_PLUGIN_ROOT}/client/lsp-client.cs"],
           "transport": "stdio",
           "extensionToLanguage": {
             ".cs": "csharp",

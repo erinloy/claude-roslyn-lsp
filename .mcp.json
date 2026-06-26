@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "roslyn-refactor": {
-      "command": "bash",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/launch-mcp.sh"],
+      "command": "dotnet",
+      "args": ["run", "-c", "Release", "--project", "${CLAUDE_PLUGIN_ROOT}/mcp/ClaudeRoslynLsp.Mcp.csproj"],
       "env": {}
     }
   }
