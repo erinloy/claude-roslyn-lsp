@@ -1,0 +1,9 @@
+# Shell scripts MUST stay LF — a CRLF shebang line breaks execution on Linux/macOS.
+*.sh text eol=lf
+
+# Normalize the rest to LF in the repo (checked out native on Windows).
+*.cs   text
+*.csproj text
+*.json text
+*.md   text
+LICENSE text

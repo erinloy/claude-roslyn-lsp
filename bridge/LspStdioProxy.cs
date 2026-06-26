@@ -29,7 +29,7 @@ internal sealed class LspStdioProxy
 
     public async Task<int> RunAsync(CancellationToken ct)
     {
-        using var server = StartServer();
+        using var server = RoslynServer.Start(_serverDll, _logDir, _log);
         _log($"roslyn server pid {server.Id} started");
 
         var clientIn = Console.OpenStandardInput();
@@ -53,48 +53,6 @@ internal sealed class LspStdioProxy
         linked.Cancel();
         try { if (!server.HasExited) server.Kill(entireProcessTree: true); } catch { /* best-effort */ }
         return server.HasExited ? server.ExitCode : 0;
-    }
-
-    private Process StartServer()
-    {
-        Directory.CreateDirectory(_logDir);
-        var (fileName, leadingArgs) = ResolveLauncher(_serverDll);
-
-        var psi = new ProcessStartInfo
-        {
-            FileName = fileName,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
-        foreach (var a in leadingArgs) psi.ArgumentList.Add(a);
-        // Roslyn server CLI: stdio transport + a required log directory. logLevel keeps the noise reasonable.
-        psi.ArgumentList.Add("--stdio");
-        psi.ArgumentList.Add("--logLevel");
-        psi.ArgumentList.Add("Information");
-        psi.ArgumentList.Add("--extensionLogDirectory");
-        psi.ArgumentList.Add(_logDir);
-
-        var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
-        proc.ErrorDataReceived += (_, e) => { if (e.Data is not null) _log($"[roslyn] {e.Data}"); };
-        proc.Start();
-        proc.BeginErrorReadLine();
-        return proc;
-    }
-
-    /// <summary>
-    /// The <c>.&lt;rid&gt;</c> server package is self-contained: run its native apphost directly when present; otherwise
-    /// fall back to <c>dotnet &lt;dll&gt;</c> (framework-dependent / neutral package).
-    /// </summary>
-    private static (string fileName, string[] leadingArgs) ResolveLauncher(string serverDll)
-    {
-        string dir = Path.GetDirectoryName(serverDll)!;
-        string apphost = Path.Combine(dir,
-            OperatingSystem.IsWindows() ? "Microsoft.CodeAnalysis.LanguageServer.exe" : "Microsoft.CodeAnalysis.LanguageServer");
-        if (File.Exists(apphost)) return (apphost, Array.Empty<string>());
-        return ("dotnet", new[] { serverDll });
     }
 
     private async Task PumpClientToServerAsync(LspMessageReader reader, LspMessageWriter serverWriter, CancellationToken ct)
