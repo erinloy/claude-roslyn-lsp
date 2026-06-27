@@ -189,6 +189,173 @@ public static class RoslynOps
         }
     }
 
+    // ---- navigation: definition / implementation / type-definition / hover --------------------------------------------
+
+    /// <summary>Go to the definition of the symbol at a 0-based (line, col). Usually one location; can be several (partials).</summary>
+    public static async Task<IReadOnlyList<RefLoc>> DefinitionAsync(
+        RoslynDaemonClient client, string file, int line, int col, CancellationToken ct)
+        => ParseLocations(await client.RequestAsync("textDocument/definition", PosParams(file, line, col), ct).ConfigureAwait(false));
+
+    /// <summary>Find the implementations of the interface/abstract member or type at a 0-based (line, col).</summary>
+    public static async Task<IReadOnlyList<RefLoc>> ImplementationsAsync(
+        RoslynDaemonClient client, string file, int line, int col, CancellationToken ct)
+        => ParseLocations(await client.RequestAsync("textDocument/implementation", PosParams(file, line, col), ct).ConfigureAwait(false));
+
+    /// <summary>Jump to the declared TYPE of the symbol at a 0-based (line, col) (e.g. a variable's type).</summary>
+    public static async Task<IReadOnlyList<RefLoc>> TypeDefinitionAsync(
+        RoslynDaemonClient client, string file, int line, int col, CancellationToken ct)
+        => ParseLocations(await client.RequestAsync("textDocument/typeDefinition", PosParams(file, line, col), ct).ConfigureAwait(false));
+
+    /// <summary>Hover info (type signature + XML doc) for the symbol at a 0-based (line, col). Null if none.</summary>
+    public static async Task<string?> HoverAsync(
+        RoslynDaemonClient client, string file, int line, int col, CancellationToken ct)
+    {
+        JsonNode? res = await client.RequestAsync("textDocument/hover", PosParams(file, line, col), ct).ConfigureAwait(false);
+        JsonNode? c = res?["contents"];
+        if (c is JsonObject o) return o["value"]?.GetValue<string>() ?? o.ToJsonString();       // MarkupContent {kind,value}
+        if (c is JsonArray a) return string.Join("\n", a.Select(x => x?["value"]?.GetValue<string>() ?? x?.ToString()));
+        if (c is JsonValue v) return v.ToString();                                              // bare MarkedString
+        return null;
+    }
+
+    // ---- in-place editing: code actions (quick fixes & refactorings) --------------------------------------------------
+
+    public readonly record struct CodeAct(string Title, string Kind, bool Applicable);
+
+    /// <summary>List the code actions (quick fixes + refactorings) available at a 0-based position/range — the menu you'd
+    /// then apply by title with <see cref="ApplyCodeActionAsync"/>. Diagnostics overlapping the range drive the quick-fixes.</summary>
+    public static async Task<IReadOnlyList<CodeAct>> CodeActionsAsync(
+        RoslynDaemonClient client, string file, int line, int col, int? endLine, int? endCol, CancellationToken ct)
+        => await WithOpenDocAsync(client, file, async (uri, diags) =>
+        {
+            JsonNode? res = await client.RequestAsync("textDocument/codeAction",
+                CodeActionParams(uri, line, col, endLine, endCol, diags, null), ct).ConfigureAwait(false);
+            var list = new List<CodeAct>();
+            if (res is JsonArray arr)
+                foreach (JsonNode? a in arr)
+                    list.Add(new CodeAct(a?["title"]?.GetValue<string>() ?? "", a?["kind"]?.GetValue<string>() ?? "",
+                        a?["edit"] is not null || a?["data"] is not null));
+            return (IReadOnlyList<CodeAct>)list;
+        }, ct).ConfigureAwait(false);
+
+    /// <summary>Apply the code action whose title matches (exact, else contains) at a 0-based position/range. Resolves the
+    /// lazy edit (codeAction/resolve) when Roslyn returns the action without one, then writes the edit to disk. Returns the
+    /// changed files (empty if no action matched or the action carried no applicable edit).</summary>
+    public static async Task<IReadOnlyList<string>> ApplyCodeActionAsync(
+        RoslynDaemonClient client, string file, int line, int col, string title, int? endLine, int? endCol, CancellationToken ct)
+        => await WithOpenDocAsync(client, file, async (uri, diags) =>
+        {
+            JsonNode? res = await client.RequestAsync("textDocument/codeAction",
+                CodeActionParams(uri, line, col, endLine, endCol, diags, null), ct).ConfigureAwait(false);
+            JsonNode? chosen = null;
+            if (res is JsonArray arr)
+                foreach (JsonNode? a in arr)
+                {
+                    string t = a?["title"]?.GetValue<string>() ?? "";
+                    if (string.Equals(t, title, StringComparison.OrdinalIgnoreCase)) { chosen = a; break; }
+                    if (chosen is null && t.Contains(title, StringComparison.OrdinalIgnoreCase)) chosen = a;
+                }
+            return (IReadOnlyList<string>)await ResolveAndApplyAsync(client, chosen, ct).ConfigureAwait(false);
+        }, ct).ConfigureAwait(false);
+
+    /// <summary>Organize/clean a file's using directives (remove unnecessary + sort) via the source.organizeImports action.</summary>
+    public static async Task<IReadOnlyList<string>> OrganizeImportsAsync(
+        RoslynDaemonClient client, string file, CancellationToken ct)
+        => await WithOpenDocAsync(client, file, async (uri, diags) =>
+        {
+            JsonNode? res = await client.RequestAsync("textDocument/codeAction",
+                CodeActionParams(uri, 0, 0, 1_000_000, 0, diags, "source.organizeImports"), ct).ConfigureAwait(false);
+            var changed = new List<string>();
+            if (res is JsonArray arr)
+                foreach (JsonNode? a in arr)
+                    foreach (string f in await ResolveAndApplyAsync(client, a, ct).ConfigureAwait(false))
+                        if (!changed.Contains(f)) changed.Add(f);
+            return (IReadOnlyList<string>)changed;
+        }, ct).ConfigureAwait(false);
+
+    private static async Task<IReadOnlyList<string>> ResolveAndApplyAsync(RoslynDaemonClient client, JsonNode? action, CancellationToken ct)
+    {
+        if (action is null) return Array.Empty<string>();
+        // A Roslyn code action usually arrives with `data` and a lazy `edit`; codeAction/resolve fills the edit in.
+        if (action["edit"] is null && action["data"] is not null)
+        {
+            JsonNode? resolved = await client.RequestAsync("codeAction/resolve", action.DeepClone()!.AsObject(), ct).ConfigureAwait(false);
+            if (resolved is not null) action = resolved;
+        }
+        return action["edit"] is not null ? LspEdits.ApplyWorkspaceEdit(action["edit"]) : Array.Empty<string>();
+    }
+
+    // ---- shared helpers ----------------------------------------------------------------------------------------------
+
+    /// <summary>Parse a definition/implementation/typeDefinition result: Location | Location[] | LocationLink | LocationLink[].</summary>
+    private static List<RefLoc> ParseLocations(JsonNode? res)
+    {
+        var list = new List<RefLoc>();
+        void AddOne(JsonNode? loc)
+        {
+            if (loc is null) return;
+            string uri = loc["uri"]?.GetValue<string>() ?? loc["targetUri"]?.GetValue<string>() ?? "";
+            JsonNode? start = loc["range"]?["start"] ?? loc["targetSelectionRange"]?["start"] ?? loc["targetRange"]?["start"];
+            if (uri.Length == 0 || start is null) return;
+            list.Add(new RefLoc(LspEdits.UriToPath(uri), start["line"]?.GetValue<int>() ?? -1, start["character"]?.GetValue<int>() ?? -1));
+        }
+        if (res is JsonArray arr) foreach (JsonNode? l in arr) AddOne(l);
+        else AddOne(res);
+        return list;
+    }
+
+    /// <summary>didOpen a file (Roslyn computes code actions / diagnostics only for OPEN docs), pull its diagnostics for
+    /// code-action context, run <paramref name="body"/>, then didClose. Disk stays the single source of truth.</summary>
+    private static async Task<T> WithOpenDocAsync<T>(
+        RoslynDaemonClient client, string file, Func<string, JsonArray, Task<T>> body, CancellationToken ct)
+    {
+        string uri = LspEdits.PathToUri(file);
+        string text = File.Exists(file) ? File.ReadAllText(file) : "";
+        string langId = file.EndsWith(".vb", StringComparison.OrdinalIgnoreCase) ? "vb" : "csharp";
+        client.Notify("textDocument/didOpen", new JsonObject
+        {
+            ["textDocument"] = new JsonObject { ["uri"] = uri, ["languageId"] = langId, ["version"] = 1, ["text"] = text },
+        });
+        try
+        {
+            JsonNode? dres = await client.RequestAsync("textDocument/diagnostic",
+                new JsonObject { ["textDocument"] = new JsonObject { ["uri"] = uri } }, ct).ConfigureAwait(false);
+            JsonArray diags = (dres?["items"] as JsonArray)?.DeepClone()?.AsArray() ?? new JsonArray();
+            return await body(uri, diags).ConfigureAwait(false);
+        }
+        finally
+        {
+            client.Notify("textDocument/didClose", new JsonObject { ["textDocument"] = new JsonObject { ["uri"] = uri } });
+        }
+    }
+
+    private static JsonObject CodeActionParams(string uri, int line, int col, int? endLine, int? endCol, JsonArray allDiags, string? only)
+    {
+        int el = endLine ?? line, ec = endCol ?? col;
+        // Pass the diagnostics overlapping the requested line span as context — that's what surfaces the quick-fixes.
+        var ctxDiags = new JsonArray();
+        foreach (JsonNode? d in allDiags)
+        {
+            int dl = d?["range"]?["start"]?["line"]?.GetValue<int>() ?? -1;
+            if (dl >= line && dl <= el) ctxDiags.Add(d!.DeepClone());
+        }
+        var context = new JsonObject { ["diagnostics"] = ctxDiags };
+        if (only is not null) context["only"] = new JsonArray { only };
+        return new JsonObject
+        {
+            ["textDocument"] = new JsonObject { ["uri"] = uri },
+            ["range"] = new JsonObject
+            {
+                ["start"] = new JsonObject { ["line"] = line, ["character"] = col },
+                ["end"] = new JsonObject { ["line"] = el, ["character"] = ec },
+            },
+            ["context"] = context,
+        };
+    }
+
+    private static JsonObject PosParams(string file, int line, int col)
+        => new() { ["textDocument"] = Doc(file), ["position"] = Pos(line, col) };
+
     private static JsonObject Doc(string file) => new() { ["uri"] = LspEdits.PathToUri(file) };
     private static JsonObject Pos(int line, int col) => new() { ["line"] = line, ["character"] = col };
 }

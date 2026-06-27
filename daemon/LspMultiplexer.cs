@@ -482,9 +482,20 @@ internal sealed class LspMultiplexer
                         ["documentSymbol"] = new JsonObject { ["hierarchicalDocumentSymbolSupport"] = true },
                         ["hover"] = new JsonObject(),
                         ["definition"] = new JsonObject(),
+                        ["typeDefinition"] = new JsonObject(),   // textDocument/typeDefinition — jump to a value's type
+                        ["implementation"] = new JsonObject(),   // textDocument/implementation — interface/abstract impls
                         ["references"] = new JsonObject(),
                         ["rename"] = new JsonObject(),       // textDocument/rename — solution-wide rename
                         ["formatting"] = new JsonObject(),   // textDocument/formatting — whole-document format
+                        // textDocument/codeAction — quick-fixes & refactorings; resolveProvider → we fetch the edit via
+                        // codeAction/resolve before applying (Roslyn returns actions with `data` and a lazy `edit`).
+                        ["codeAction"] = new JsonObject
+                        {
+                            ["resolveSupport"] = new JsonObject { ["properties"] = new JsonArray { "edit", "command" } },
+                            ["dataSupport"] = true,
+                        },
+                        ["callHierarchy"] = new JsonObject(),    // prepareCallHierarchy + incoming/outgoing calls
+                        ["typeHierarchy"] = new JsonObject(),    // prepareTypeHierarchy + super/sub types
                         ["diagnostic"] = new JsonObject { ["dynamicRegistration"] = false }, // pull diagnostics (textDocument/diagnostic)
                     },
                 },

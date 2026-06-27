@@ -104,6 +104,72 @@ public sealed class CrlspCommands
             Console.WriteLine($"  {SevName(d.Severity),-7} :{d.Line}:{d.Col} {d.Code}: {d.Message}");
     }
 
+    /// <summary>Go to the definition of the symbol at a 0-based file position.</summary>
+    [Command("def")]
+    public async Task Def([Argument] string file, [Argument] int line, [Argument] int col, CancellationToken ct)
+    {
+        await using var c = await Connect(ct);
+        PrintLocs("definition", await RoslynOps.DefinitionAsync(c, file, line, col, ct), file, line, col);
+    }
+
+    /// <summary>Find implementations of the interface/abstract/virtual member at a 0-based file position.</summary>
+    [Command("impl")]
+    public async Task Impl([Argument] string file, [Argument] int line, [Argument] int col, CancellationToken ct)
+    {
+        await using var c = await Connect(ct);
+        PrintLocs("implementations", await RoslynOps.ImplementationsAsync(c, file, line, col, ct), file, line, col);
+    }
+
+    /// <summary>Jump to the declared type of the symbol at a 0-based file position.</summary>
+    [Command("typedef")]
+    public async Task TypeDef([Argument] string file, [Argument] int line, [Argument] int col, CancellationToken ct)
+    {
+        await using var c = await Connect(ct);
+        PrintLocs("type definition", await RoslynOps.TypeDefinitionAsync(c, file, line, col, ct), file, line, col);
+    }
+
+    /// <summary>Hover info (type signature + XML doc) for the symbol at a 0-based file position.</summary>
+    [Command("hover")]
+    public async Task Hover([Argument] string file, [Argument] int line, [Argument] int col, CancellationToken ct)
+    {
+        await using var c = await Connect(ct);
+        string? h = await RoslynOps.HoverAsync(c, file, line, col, ct);
+        Console.WriteLine(string.IsNullOrWhiteSpace(h) ? $"no hover info at {file}:{line}:{col}" : h);
+    }
+
+    /// <summary>List the code actions (quick fixes + refactorings) available at a 0-based file position.</summary>
+    [Command("actions")]
+    public async Task Actions([Argument] string file, [Argument] int line, [Argument] int col, CancellationToken ct)
+    {
+        await using var c = await Connect(ct);
+        var acts = await RoslynOps.CodeActionsAsync(c, file, line, col, null, null, ct);
+        if (acts.Count == 0) { Console.WriteLine($"no code actions at {file}:{line}:{col}"); return; }
+        Console.WriteLine($"code actions ({acts.Count}) — apply with: crlsp fix <file> <line> <col> \"<title>\"");
+        foreach (var a in acts) Console.WriteLine($"  [{(string.IsNullOrEmpty(a.Kind) ? "action" : a.Kind)}] {a.Title}");
+    }
+
+    /// <summary>Apply the code action whose title matches at a 0-based file position; writes the edit to disk.</summary>
+    [Command("fix")]
+    public async Task Fix([Argument] string file, [Argument] int line, [Argument] int col, [Argument] string title, CancellationToken ct)
+    {
+        await using var c = await Connect(ct);
+        var changed = await RoslynOps.ApplyCodeActionAsync(c, file, line, col, title, null, null, ct);
+        if (changed.Count == 0) { Console.WriteLine($"no code action titled '{title}' applied at {file}:{line}:{col}"); return; }
+        Console.WriteLine($"applied '{title}' across {changed.Count} file(s):");
+        foreach (var f in changed) Console.WriteLine($"  {f}");
+    }
+
+    /// <summary>Organize a C# file's usings (remove unnecessary + sort); writes to disk.</summary>
+    [Command("organize")]
+    public async Task Organize([Argument] string file, CancellationToken ct)
+    {
+        await using var c = await Connect(ct);
+        var changed = await RoslynOps.OrganizeImportsAsync(c, file, ct);
+        if (changed.Count == 0) { Console.WriteLine($"usings already organized: {file}"); return; }
+        Console.WriteLine($"organized usings across {changed.Count} file(s):");
+        foreach (var f in changed) Console.WriteLine($"  {f}");
+    }
+
     /// <summary>Probe the PUSH path: open a file, then print the publishDiagnostics the daemon broadcasts back (the same
     /// notification Claude Code consumes for edit-feedback). With --apply, mid-stream it writes another file's content to
     /// disk and sends didChange — exercising the daemon's disk-resync edit path. Verifies the pull→push diagnostics bridge.</summary>
@@ -178,6 +244,13 @@ public sealed class CrlspCommands
     {
         1 => "error", 2 => "warning", 3 => "info", 4 => "hint", _ => $"sev{s}",
     };
+
+    private static void PrintLocs(string label, IReadOnlyList<RoslynOps.RefLoc> locs, string file, int line, int col)
+    {
+        if (locs.Count == 0) { Console.WriteLine($"no {label} at {file}:{line}:{col}"); return; }
+        Console.WriteLine($"{label} ({locs.Count}):");
+        foreach (var r in locs) Console.WriteLine($"  {r.Path}:{r.Line}:{r.Col}");
+    }
 
     /// <summary>Connect to (or start) the shared Roslyn daemon for the current workspace — same derivation as the MCP.</summary>
     private static async Task<RoslynDaemonClient> Connect(CancellationToken ct)
