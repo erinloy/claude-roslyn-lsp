@@ -28,6 +28,7 @@
          so it shares the bridge's LspMessageReader/Writer (and PipeKey for the endpoint name). -->
     <Compile Include="../bridge/PipeKey.cs" Link="PipeKey.cs" />
     <Compile Include="../bridge/JsonRpc.cs" Link="JsonRpc.cs" />
+    <Compile Include="../bridge/DaemonConnector.cs" Link="DaemonConnector.cs" />
   </ItemGroup>
 
 </Project>
