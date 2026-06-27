@@ -64,3 +64,33 @@ try {
     }
 }
 finally { if ($held) { try { $mutex.ReleaseMutex() } catch {} } }
+
+# --- Pre-warm the shared daemon for THIS workspace ---------------------------------------------------------------
+# The first .cs edit otherwise pays a cold start (daemon boot + loading a 300-project solution) while Claude's LSP
+# host is mid-handshake — long enough that the client connects then gets torn down. Starting the daemon here, at
+# SessionStart, means the first edit connects to an already-warm owner. Idempotent: the daemon's own singleton mutex
+# makes any duplicate exit instantly, and we skip when one is already alive.
+function PreWarm-Daemon {
+    $ws = $env:CLAUDE_PROJECT_DIR
+    if ([string]::IsNullOrWhiteSpace($ws)) { $ws = (Get-Location).Path }
+    $daemonDll = Join-Path $Root 'daemon\bin\Release\net8.0\ClaudeRoslynLsp.Daemon.dll'
+    if (-not (Test-Path $daemonDll)) { L "prewarm SKIP: daemon dll missing ($daemonDll)"; return }
+
+    # Endpoint hash must match PipeKey.ForRoot exactly: normalize (\\→/, trim trailing /, lowercase), SHA256, first 16 hex.
+    $norm = ($ws -replace '\\', '/').TrimEnd('/').ToLowerInvariant()
+    $sha = [System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($norm))
+    $endpoint = 'roslyn-lsp-' + ([System.Convert]::ToHexString($sha)).ToLowerInvariant().Substring(0, 16)
+
+    # Liveness: the daemon holds "<endpoint>-daemon" for its whole life. If we can take it, none is running.
+    $alive = $false
+    $m = New-Object System.Threading.Mutex($false, "$endpoint-daemon")
+    try { if ($m.WaitOne(0)) { try { $m.ReleaseMutex() } catch {} } else { $alive = $true } }
+    catch [System.Threading.AbandonedMutexException] { } catch { }
+    finally { $m.Dispose() }
+    if ($alive) { L "prewarm: daemon already alive for $ws ($endpoint)"; return }
+
+    L "prewarm: starting daemon for $ws ($endpoint)"
+    try { Start-Process -FilePath 'dotnet' -ArgumentList @('exec', $daemonDll, '--root', $ws) -WindowStyle Hidden | Out-Null }
+    catch { L "prewarm: failed to start daemon: $($_.Exception.Message)" }
+}
+PreWarm-Daemon

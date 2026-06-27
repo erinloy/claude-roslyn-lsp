@@ -1,7 +1,7 @@
-using System.IO.Pipes;
 using ClaudeRoslynLsp.Bridge;   // RoslynAcquirer, RoslynServer, PipeKey (linked)
 using ClaudeRoslynLsp.Daemon;
 using ConsoleAppFramework;
+using Sluice;                   // ShmFrameListener — the client rendezvous (NamedPipeServerStream analogue)
 
 // The shared Roslyn daemon — one per workspace, owns ONE Roslyn language server + workspace, multiplexed onto many thin
 // clients over a named pipe. Launched (detached) by lsp-client.cs when no daemon for the workspace is yet running.
@@ -67,20 +67,19 @@ static async Task RunDaemon(
     catch (OperationCanceledException) { }
 }
 
-static async Task AcceptLoopAsync(string pipeName, LspMultiplexer mux, Action<string> log, CancellationToken ct)
+static async Task AcceptLoopAsync(string endpoint, LspMultiplexer mux, Action<string> log, CancellationToken ct)
 {
+    using var listener = new ShmFrameListener(endpoint, PipeKey.FrameCapacity);
     while (!ct.IsCancellationRequested)
     {
-        var pipe = new NamedPipeServerStream(
-            pipeName, PipeDirection.InOut, NamedPipeServerStream.MaxAllowedServerInstances,
-            PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
         try
         {
-            await pipe.WaitForConnectionAsync(ct).ConfigureAwait(false);
-            mux.AddClient(pipe);
+            // Accept blocks (spin→doorbell) on a pool thread; each connection is its own duplex frame channel.
+            IFrameChannel channel = await Task.Run(() => listener.Accept(ct), ct).ConfigureAwait(false);
+            mux.AddClient(channel);
         }
-        catch (OperationCanceledException) { pipe.Dispose(); break; }
-        catch (Exception ex) { log($"accept error: {ex.Message}"); pipe.Dispose(); }
+        catch (OperationCanceledException) { break; }
+        catch (Exception ex) { log($"accept error: {ex.Message}"); }
     }
 }
 

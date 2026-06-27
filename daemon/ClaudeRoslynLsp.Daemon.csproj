@@ -15,12 +15,19 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Repo-standard CLI surface (Bitter uses it): zero-dependency source generator, AOT-safe, no runtime assembly.
-         It generates the arg parsing, help output, and a Ctrl-C/SIGTERM-wired CancellationToken from the signature. -->
-    <PackageReference Include="ConsoleAppFramework" Version="5.7.13">
-      <PrivateAssets>all</PrivateAssets>
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-    </PackageReference>
+    <!-- CLI surface via the VENDORED ConsoleAppFramework (___/external/consoleappframework), per the repo directive that
+         anything on the command line uses it. It is a zero-dependency source generator (no runtime assembly) — referenced
+         as an Analyzer with ReferenceOutputAssembly=false. It generates the arg parsing, help, and a Ctrl-C/SIGTERM-wired
+         CancellationToken from RunDaemon's signature. -->
+    <ProjectReference Include="../../___/external/consoleappframework/src/ConsoleAppFramework/ConsoleAppFramework.csproj"
+                      OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Zero-serialization shared-memory IPC (erinloy/Sluice). The client↔daemon hop is a Sluice ShmFrameChannel —
+         frame-native (IFrameChannel was designed for LSP's Content-Length messages), zero-copy, faster than the
+         named pipe it replaces. Vendored submodule under ___/external; this is its first in-repo consumer. -->
+    <ProjectReference Include="../../___/external/Sluice/src/Sluice/Sluice.csproj" />
   </ItemGroup>
 
   <ItemGroup>

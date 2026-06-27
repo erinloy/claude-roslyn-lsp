@@ -19,9 +19,15 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- One source of truth for the pipe key — the client linked a copy when it was file-based; now it shares the real
-         bridge type so the hash can never drift from the daemon's. -->
+    <!-- Zero-serialization shared-memory IPC (erinloy/Sluice) — the client↔daemon transport (ShmFrameChannel). -->
+    <ProjectReference Include="../../___/external/Sluice/src/Sluice/Sluice.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- One source of truth for the pipe key + LSP framing — the client now frames Claude's stdio into Sluice frames,
+         so it shares the bridge's LspMessageReader/Writer (and PipeKey for the endpoint name). -->
     <Compile Include="../bridge/PipeKey.cs" Link="PipeKey.cs" />
+    <Compile Include="../bridge/JsonRpc.cs" Link="JsonRpc.cs" />
   </ItemGroup>
 
 </Project>

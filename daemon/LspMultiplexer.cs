@@ -1,6 +1,9 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Text;
 using System.Text.Json.Nodes;
 using ClaudeRoslynLsp.Bridge; // JsonRpc + SolutionLocator (linked)
+using Sluice;                 // IFrameChannel — the client↔daemon transport seam
 
 namespace ClaudeRoslynLsp.Daemon;
 
@@ -55,14 +58,14 @@ internal sealed class LspMultiplexer
         _log("LS initialized + workspace opened — daemon ready for clients");
     }
 
-    public void AddClient(Stream pipe)
+    public void AddClient(IFrameChannel channel)
     {
         int id = Interlocked.Increment(ref _nextClientId);
-        var session = new ClientSession(id, pipe, this);
+        var session = new ClientSession(id, channel, this, _log);
         _clients[id] = session;
         _log($"client {id} connected ({_clients.Count} active)");
         ClientCountChanged?.Invoke();
-        _ = Task.Run(() => session.RunAsync(_ct));
+        session.Start(_ct);
     }
 
     private void RemoveClient(ClientSession session)
@@ -289,45 +292,122 @@ internal sealed class LspMultiplexer
     }
 }
 
-/// <summary>One connected client (a thin <c>lsp-client.cs</c> over a named pipe). Reads its frames, hands them to the
-/// multiplexer, and writes responses/notifications back.</summary>
+/// <summary>
+/// One connected client (a thin <c>lsp-client.cs</c> over a Sluice <see cref="IFrameChannel"/>; each frame is one LSP
+/// message body — the frame boundary replaces Content-Length). A dedicated reader thread pulls inbound frames and
+/// hands them to the multiplexer; a dedicated writer thread drains a BOUNDED outbound queue to the channel. The bound
+/// is the multi-agent safety valve: a slow or wedged client fills its queue and gets dropped, it can never block the
+/// shared server pump or stall the diagnostics broadcast to OTHER agents. Death detection watches the client's OS
+/// process id (announced in a hello frame) — shared memory, unlike a pipe, gives no EOF when the peer exits.
+/// </summary>
 internal sealed class ClientSession
 {
-    private readonly Stream _pipe;
+    private readonly IFrameChannel _channel;
     private readonly LspMultiplexer _mux;
-    private readonly LspMessageReader _reader;
-    private readonly LspMessageWriter _writer;
+    private readonly Action<string> _log;
     private readonly CancellationTokenSource _closed = new();
+    private readonly BlockingCollection<byte[]> _outbound = new(boundedCapacity: 8192);
+    private int _pidWatched;
 
     public int Id { get; }
 
-    public ClientSession(int id, Stream pipe, LspMultiplexer mux)
+    public ClientSession(int id, IFrameChannel channel, LspMultiplexer mux, Action<string> log)
     {
         Id = id;
-        _pipe = pipe;
+        _channel = channel;
         _mux = mux;
-        _reader = new LspMessageReader(pipe);
-        _writer = new LspMessageWriter(pipe);
+        _log = log;
     }
 
-    public Task SendAsync(JsonNode node) => _writer.WriteJsonAsync(node, _closed.Token);
-    public Task SendRawAsync(ReadOnlyMemory<byte> raw) => _writer.WriteRawAsync(raw, _closed.Token);
-    public void Close() { try { _closed.Cancel(); } catch { } try { _pipe.Dispose(); } catch { } }
+    public Task SendAsync(JsonNode node) => Enqueue(Encoding.UTF8.GetBytes(node.ToJsonString()));
+    public Task SendRawAsync(ReadOnlyMemory<byte> raw) => Enqueue(raw.ToArray());
 
-    public async Task RunAsync(CancellationToken ct)
+    // Non-blocking enqueue: a full queue means the client isn't draining (busy/stalled) — drop it rather than let it
+    // back-pressure the shared pump. Returns a completed task so the mux's async write sites stay non-blocking.
+    private Task Enqueue(byte[] frame)
+    {
+        try { if (!_outbound.TryAdd(frame)) { _log($"client {Id} outbound full — dropping"); Close(); } }
+        catch { Close(); }
+        return Task.CompletedTask;
+    }
+
+    public void Close()
+    {
+        try { _closed.Cancel(); } catch { }
+        try { _outbound.CompleteAdding(); } catch { }
+        try { _channel.Dispose(); } catch { }
+    }
+
+    public void Start(CancellationToken ct)
+    {
+        new Thread(() => ReadLoop(ct)) { IsBackground = true, Name = $"crlsp-cli-{Id}-rd" }.Start();
+        new Thread(() => WriteLoop(ct)) { IsBackground = true, Name = $"crlsp-cli-{Id}-wr" }.Start();
+    }
+
+    private void ReadLoop(CancellationToken ct)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _closed.Token);
+        var tok = linked.Token;
+        try
+        {
+            while (!tok.IsCancellationRequested && _channel.WaitForFrame(tok))
+            {
+                while (_channel.TryReadFrame(out var span))
+                {
+                    byte[] raw = span.ToArray();   // copy out before AdvanceFrame frees the slot
+                    _channel.AdvanceFrame();
+                    if (raw.Length == 0) { return; }            // disconnect sentinel
+                    if (TryHandleHello(raw)) continue;          // PID announce — not an LSP message
+                    _mux.HandleClientMessageAsync(this, new LspMessage { Raw = raw }).GetAwaiter().GetResult();
+                }
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { _log($"client {Id} read loop ended: {ex.Message}"); }
+        finally { _mux.OnSessionEnded(this); Close(); }
+    }
+
+    private void WriteLoop(CancellationToken ct)
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _closed.Token);
         try
         {
-            while (!linked.IsCancellationRequested)
-            {
-                LspMessage? msg = await _reader.ReadAsync(linked.Token).ConfigureAwait(false);
-                if (msg is null) break; // client disconnected
-                await _mux.HandleClientMessageAsync(this, msg).ConfigureAwait(false);
-            }
+            foreach (var frame in _outbound.GetConsumingEnumerable(linked.Token))
+                _channel.WriteFrame(frame, linked.Token);
         }
         catch (OperationCanceledException) { }
-        catch (Exception) { /* pipe broke */ }
-        finally { _mux.OnSessionEnded(this); Close(); }
+        catch (Exception) { /* channel broke */ }
+        finally { Close(); }
     }
+
+    // The client's first frame announces its PID; we then reap the session when that process exits (shared memory has
+    // no peer-death signal). Returns true if the frame was the hello (swallow it).
+    private bool TryHandleHello(byte[] raw)
+    {
+        if (_pidWatched != 0) return false;
+        try
+        {
+            if (JsonNode.Parse(raw)?[PipeKey.PidHelloKey]?.GetValue<int>() is int pid && pid > 0)
+            {
+                _pidWatched = pid;
+                WatchProcess(pid);
+                return true;
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    private void WatchProcess(int pid) => _ = Task.Run(async () =>
+    {
+        try
+        {
+            using var proc = Process.GetProcessById(pid);
+            await proc.WaitForExitAsync(_closed.Token).ConfigureAwait(false);
+        }
+        catch { /* already gone / inaccessible / cancelled */ }
+        if (!_closed.IsCancellationRequested) _log($"client {Id} process {pid} exited — reaping");
+        _mux.OnSessionEnded(this);
+        Close();
+    });
 }
