@@ -1,0 +1,15 @@
+Z:\SOURCE\Ziltch\claude-roslyn-lsp\samples\SampleRunningSystemExtension\bin\Release\net8.0\SampleRunningSystemExtension.deps.json
+Z:\SOURCE\Ziltch\claude-roslyn-lsp\samples\SampleRunningSystemExtension\bin\Release\net8.0\SampleRunningSystemExtension.dll
+Z:\SOURCE\Ziltch\claude-roslyn-lsp\samples\SampleRunningSystemExtension\bin\Release\net8.0\SampleRunningSystemExtension.pdb
+Z:\SOURCE\Ziltch\claude-roslyn-lsp\samples\SampleRunningSystemExtension\bin\Release\net8.0\ClaudeRoslynLsp.Extensions.Abstractions.dll
+Z:\SOURCE\Ziltch\claude-roslyn-lsp\samples\SampleRunningSystemExtension\bin\Release\net8.0\ClaudeRoslynLsp.Extensions.Abstractions.pdb
+Z:\SOURCE\Ziltch\claude-roslyn-lsp\samples\SampleRunningSystemExtension\obj\Release\net8.0\SampleRunningSystemExtension.csproj.AssemblyReference.cache
+Z:\SOURCE\Ziltch\claude-roslyn-lsp\samples\SampleRunningSystemExtension\obj\Release\net8.0\SampleRunningSystemExtension.GeneratedMSBuildEditorConfig.editorconfig
+Z:\SOURCE\Ziltch\claude-roslyn-lsp\samples\SampleRunningSystemExtension\obj\Release\net8.0\SampleRunningSystemExtension.AssemblyInfoInputs.cache
+Z:\SOURCE\Ziltch\claude-roslyn-lsp\samples\SampleRunningSystemExtension\obj\Release\net8.0\SampleRunningSystemExtension.AssemblyInfo.cs
+Z:\SOURCE\Ziltch\claude-roslyn-lsp\samples\SampleRunningSystemExtension\obj\Release\net8.0\SampleRunningSystemExtension.csproj.CoreCompileInputs.cache
+Z:\SOURCE\Ziltch\claude-roslyn-lsp\samples\SampleRunningSystemExtension\obj\Release\net8.0\SampleRu.391F7A47.Up2Date
+Z:\SOURCE\Ziltch\claude-roslyn-lsp\samples\SampleRunningSystemExtension\obj\Release\net8.0\SampleRunningSystemExtension.dll
+Z:\SOURCE\Ziltch\claude-roslyn-lsp\samples\SampleRunningSystemExtension\obj\Release\net8.0\refint\SampleRunningSystemExtension.dll
+Z:\SOURCE\Ziltch\claude-roslyn-lsp\samples\SampleRunningSystemExtension\obj\Release\net8.0\SampleRunningSystemExtension.pdb
+Z:\SOURCE\Ziltch\claude-roslyn-lsp\samples\SampleRunningSystemExtension\obj\Release\net8.0\ref\SampleRunningSystemExtension.dll

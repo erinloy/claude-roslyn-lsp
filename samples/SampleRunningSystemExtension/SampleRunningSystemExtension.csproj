@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- A reference extension. Demonstrates the full shape of a claude-roslyn-lsp extension that gives the agent visibility
+       into a RUNNING SYSTEM, loaded via .claude-roslyn/extensions.json. net8.0 so it loads into both hosts (net8 daemon,
+       net10 MCP). A real extension (e.g. Matrix's) would replace the "report this process" stand-in with an HTTP/IPC call
+       to the actual running system named in its manifest config. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <!-- A library, not a host: don't drag the ModelContextProtocol/DI runtime assemblies along — the host already has
+         them loaded, and sharing the host's copies is what keeps the [McpServerToolType] attribute identity matching. -->
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../extensions-api/ClaudeRoslynLsp.Extensions.Abstractions.csproj" />
+    <PackageReference Include="ModelContextProtocol" Version="0.4.0-preview.1" />
+  </ItemGroup>
+
+</Project>

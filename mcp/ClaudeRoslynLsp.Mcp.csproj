@@ -24,6 +24,9 @@
     <!-- Zero-serialization shared-memory IPC: the tools drive the ONE shared Roslyn daemon (the same warm workspace the
          LSP uses) over Sluice, instead of each agent's MCP loading its own MSBuildWorkspace (N× a full solution → 1×). -->
     <ProjectReference Include="../../___/external/Sluice/src/Sluice/Sluice.csproj" />
+    <!-- The system-agnostic extension contract + loader: repo-declared extensions (.claude-roslyn/extensions.json) that
+         contribute MCP tools backed by a running system. The net8.0 contract loads fine into this net10.0 host. -->
+    <ProjectReference Include="../extensions-api/ClaudeRoslynLsp.Extensions.Abstractions.csproj" />
   </ItemGroup>
 
   <ItemGroup>

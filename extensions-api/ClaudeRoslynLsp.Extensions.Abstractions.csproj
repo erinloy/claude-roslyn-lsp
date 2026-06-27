@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The STABLE, system-agnostic contract an extension implements. Referenced by the daemon (net8.0) and the MCP
+       (net10.0) hosts AND by every extension (e.g. Matrix's). net8.0 so a single extension build loads into both hosts:
+       a net8.0 assembly runs on the net8.0 daemon and on the net10.0 MCP (forward-compatible). Because extensions DIAL
+       OUT to the running system (no in-process system libraries), they too target net8.0 and stay host-loadable. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>ClaudeRoslynLsp.Extensions.Abstractions</AssemblyName>
+    <RootNamespace>ClaudeRoslynLsp.Extensions</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- IServiceCollection so an MCP extension can register the services its tool classes inject (e.g. its system client). -->
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="9.0.0" />
+  </ItemGroup>
+
+</Project>

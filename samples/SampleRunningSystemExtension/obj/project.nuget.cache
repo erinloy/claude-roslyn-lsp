@@ -1,0 +1,22 @@
+{
+  "version": 2,
+  "dgSpecHash": "RRhtUewrt4w=",
+  "success": true,
+  "projectFilePath": "Z:\\SOURCE\\Ziltch\\claude-roslyn-lsp\\samples\\SampleRunningSystemExtension\\SampleRunningSystemExtension.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\ErinLoy\\.nuget\\packages\\microsoft.extensions.ai.abstractions\\9.9.1\\microsoft.extensions.ai.abstractions.9.9.1.nupkg.sha512",
+    "C:\\Users\\ErinLoy\\.nuget\\packages\\microsoft.extensions.configuration.abstractions\\8.0.0\\microsoft.extensions.configuration.abstractions.8.0.0.nupkg.sha512",
+    "C:\\Users\\ErinLoy\\.nuget\\packages\\microsoft.extensions.dependencyinjection.abstractions\\9.0.0\\microsoft.extensions.dependencyinjection.abstractions.9.0.0.nupkg.sha512",
+    "C:\\Users\\ErinLoy\\.nuget\\packages\\microsoft.extensions.diagnostics.abstractions\\8.0.1\\microsoft.extensions.diagnostics.abstractions.8.0.1.nupkg.sha512",
+    "C:\\Users\\ErinLoy\\.nuget\\packages\\microsoft.extensions.fileproviders.abstractions\\8.0.0\\microsoft.extensions.fileproviders.abstractions.8.0.0.nupkg.sha512",
+    "C:\\Users\\ErinLoy\\.nuget\\packages\\microsoft.extensions.hosting.abstractions\\8.0.1\\microsoft.extensions.hosting.abstractions.8.0.1.nupkg.sha512",
+    "C:\\Users\\ErinLoy\\.nuget\\packages\\microsoft.extensions.logging.abstractions\\8.0.3\\microsoft.extensions.logging.abstractions.8.0.3.nupkg.sha512",
+    "C:\\Users\\ErinLoy\\.nuget\\packages\\microsoft.extensions.options\\8.0.2\\microsoft.extensions.options.8.0.2.nupkg.sha512",
+    "C:\\Users\\ErinLoy\\.nuget\\packages\\microsoft.extensions.primitives\\8.0.0\\microsoft.extensions.primitives.8.0.0.nupkg.sha512",
+    "C:\\Users\\ErinLoy\\.nuget\\packages\\modelcontextprotocol\\0.4.0-preview.1\\modelcontextprotocol.0.4.0-preview.1.nupkg.sha512",
+    "C:\\Users\\ErinLoy\\.nuget\\packages\\modelcontextprotocol.core\\0.4.0-preview.1\\modelcontextprotocol.core.0.4.0-preview.1.nupkg.sha512",
+    "C:\\Users\\ErinLoy\\.nuget\\packages\\system.io.pipelines\\8.0.0\\system.io.pipelines.8.0.0.nupkg.sha512",
+    "C:\\Users\\ErinLoy\\.nuget\\packages\\system.net.serversentevents\\10.0.0-preview.4.25258.110\\system.net.serversentevents.10.0.0-preview.4.25258.110.nupkg.sha512"
+  ],
+  "logs": []
+}

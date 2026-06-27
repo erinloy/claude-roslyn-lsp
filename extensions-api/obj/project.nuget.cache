@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "dgSpecHash": "Wcun5w9gufo=",
+  "success": true,
+  "projectFilePath": "Z:\\SOURCE\\Ziltch\\claude-roslyn-lsp\\extensions-api\\ClaudeRoslynLsp.Extensions.Abstractions.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\ErinLoy\\.nuget\\packages\\microsoft.extensions.dependencyinjection.abstractions\\9.0.0\\microsoft.extensions.dependencyinjection.abstractions.9.0.0.nupkg.sha512"
+  ],
+  "logs": []
+}
