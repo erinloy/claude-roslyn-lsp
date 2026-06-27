@@ -1,14 +1,15 @@
 using System.Text;
 using System.Text.Json.Nodes;
 
-namespace ClaudeRoslynLsp.Mcp;
+namespace ClaudeRoslynLsp.Bridge;
 
 /// <summary>
 /// Applies LSP edits (a <c>WorkspaceEdit</c> from rename, or a <c>TextEdit[]</c> from formatting) to files on disk. The
-/// language server RETURNS edits; it does not write them — the agent works on files, so the MCP is what persists them.
-/// LSP positions are 0-based (line, character-in-UTF-16-code-units), which maps directly onto a C# UTF-16 string.
+/// language server RETURNS edits; it does not write them — the agent works on files, so the consumer (MCP, CLI) is what
+/// persists them. LSP positions are 0-based (line, character-in-UTF-16-code-units), which maps directly onto a C#
+/// UTF-16 string. Shared by every process that drives the daemon and then writes the result.
 /// </summary>
-internal static class LspEdits
+public static class LspEdits
 {
     public static string UriToPath(string uri)
     {

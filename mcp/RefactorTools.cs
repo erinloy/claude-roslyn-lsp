@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using System.Text;
-using System.Text.Json.Nodes;
 using ClaudeRoslynLsp.Bridge;
 using ModelContextProtocol.Server;
 
@@ -8,8 +7,9 @@ namespace ClaudeRoslynLsp.Mcp;
 
 /// <summary>
 /// Roslyn-powered codebase mutations exposed to the agent as MCP tools — the operations Claude Code's read-only LSP tool
-/// can't do: solution-wide rename, reference discovery, formatting. Each issues an LSP request to the ONE shared Roslyn
-/// daemon (the same warm workspace the LSP uses) and writes the resulting edits to disk — so no per-agent workspace load.
+/// can't do: solution-wide rename, reference discovery, formatting. Thin presentation layer over <see cref="RoslynOps"/>:
+/// the request mapping + on-disk edit application live once in the shared bridge, so the MCP and the `crlsp` CLI drive the
+/// ONE warm Roslyn daemon through the exact same verified path. These methods just format the result as a tool string.
 /// </summary>
 [McpServerToolType]
 public sealed class RefactorTools
@@ -30,14 +30,7 @@ public sealed class RefactorTools
         CancellationToken ct)
     {
         RoslynDaemonClient client = await _session.GetAsync(ct).ConfigureAwait(false);
-        JsonNode? edit = await client.RequestAsync("textDocument/rename", new JsonObject
-        {
-            ["textDocument"] = new JsonObject { ["uri"] = LspEdits.PathToUri(filePath) },
-            ["position"] = Pos(line, character),
-            ["newName"] = newName,
-        }, ct).ConfigureAwait(false);
-
-        IReadOnlyList<string> changed = LspEdits.ApplyWorkspaceEdit(edit);
+        IReadOnlyList<string> changed = await RoslynOps.RenameAsync(client, filePath, line, character, newName, ct).ConfigureAwait(false);
         if (changed.Count == 0) return Err($"no rename produced at {filePath}:{line}:{character} (no symbol there, or no change)");
         return Report($"renamed → '{newName}'", changed);
     }
@@ -52,17 +45,11 @@ public sealed class RefactorTools
         CancellationToken ct)
     {
         RoslynDaemonClient client = await _session.GetAsync(ct).ConfigureAwait(false);
-        (string uri, JsonNode position)? loc = await ResolveByNameAsync(client, fullyQualifiedName, ct).ConfigureAwait(false);
+        (string uri, System.Text.Json.Nodes.JsonNode position)? loc =
+            await RoslynOps.ResolveByNameAsync(client, fullyQualifiedName, ct).ConfigureAwait(false);
         if (loc is null) return Err($"could not resolve a type or namespace named '{fullyQualifiedName}'");
 
-        JsonNode? edit = await client.RequestAsync("textDocument/rename", new JsonObject
-        {
-            ["textDocument"] = new JsonObject { ["uri"] = loc.Value.uri },
-            ["position"] = loc.Value.position,
-            ["newName"] = newName,
-        }, ct).ConfigureAwait(false);
-
-        IReadOnlyList<string> changed = LspEdits.ApplyWorkspaceEdit(edit);
+        IReadOnlyList<string> changed = await RoslynOps.RenameAtAsync(client, loc.Value.uri, loc.Value.position, newName, ct).ConfigureAwait(false);
         if (changed.Count == 0) return Err($"no rename produced for '{fullyQualifiedName}'");
         return Report($"renamed '{fullyQualifiedName}' → '{newName}'", changed);
     }
@@ -77,24 +64,12 @@ public sealed class RefactorTools
         CancellationToken ct)
     {
         RoslynDaemonClient client = await _session.GetAsync(ct).ConfigureAwait(false);
-        JsonNode? result = await client.RequestAsync("textDocument/references", new JsonObject
-        {
-            ["textDocument"] = new JsonObject { ["uri"] = LspEdits.PathToUri(filePath) },
-            ["position"] = Pos(line, character),
-            ["context"] = new JsonObject { ["includeDeclaration"] = true },
-        }, ct).ConfigureAwait(false);
-
-        if (result is not JsonArray locations || locations.Count == 0)
-            return $"no references found at {filePath}:{line}:{character}";
+        IReadOnlyList<RoslynOps.RefLoc> refs = await RoslynOps.FindReferencesAsync(client, filePath, line, character, ct).ConfigureAwait(false);
+        if (refs.Count == 0) return $"no references found at {filePath}:{line}:{character}";
 
         var sb = new StringBuilder();
-        sb.AppendLine($"references ({locations.Count}):");
-        foreach (JsonNode? loc in locations)
-        {
-            string path = LspEdits.UriToPath(loc?["uri"]?.GetValue<string>() ?? "");
-            JsonNode? start = loc?["range"]?["start"];
-            sb.AppendLine($"  {path}:{start?["line"]?.GetValue<int>()}:{start?["character"]?.GetValue<int>()}");
-        }
+        sb.AppendLine($"references ({refs.Count}):");
+        foreach (RoslynOps.RefLoc r in refs) sb.AppendLine($"  {r.Path}:{r.Line}:{r.Col}");
         return sb.ToString();
     }
 
@@ -106,43 +81,9 @@ public sealed class RefactorTools
         CancellationToken ct)
     {
         RoslynDaemonClient client = await _session.GetAsync(ct).ConfigureAwait(false);
-        JsonNode? result = await client.RequestAsync("textDocument/formatting", new JsonObject
-        {
-            ["textDocument"] = new JsonObject { ["uri"] = LspEdits.PathToUri(filePath) },
-            ["options"] = new JsonObject { ["tabSize"] = 4, ["insertSpaces"] = true },
-        }, ct).ConfigureAwait(false);
-
-        if (result is not JsonArray edits || edits.Count == 0) return $"no formatting changes: {filePath}";
-        bool changed = LspEdits.ApplyTextEdits(filePath, edits);
+        bool changed = await RoslynOps.FormatAsync(client, filePath, ct).ConfigureAwait(false);
         return changed ? $"formatted (written): {filePath}" : $"no formatting changes: {filePath}";
     }
-
-    /// <summary>Resolve a fully-qualified type/namespace name to a declaration location via workspace/symbol.</summary>
-    private static async Task<(string uri, JsonNode position)?> ResolveByNameAsync(
-        RoslynDaemonClient client, string fqn, CancellationToken ct)
-    {
-        string shortName = fqn.Contains('.') ? fqn[(fqn.LastIndexOf('.') + 1)..] : fqn;
-        JsonNode? syms = await client.RequestAsync("workspace/symbol", new JsonObject { ["query"] = shortName }, ct).ConfigureAwait(false);
-        if (syms is not JsonArray arr) return null;
-
-        JsonNode? best = null;
-        foreach (JsonNode? s in arr)
-        {
-            if (!string.Equals(s?["name"]?.GetValue<string>(), shortName, StringComparison.Ordinal)) continue;
-            // Prefer an exact FQN match on containerName + name; else keep the first name match as a fallback.
-            string container = s?["containerName"]?.GetValue<string>() ?? "";
-            string candidateFqn = string.IsNullOrEmpty(container) ? shortName : $"{container}.{shortName}";
-            if (string.Equals(candidateFqn, fqn, StringComparison.Ordinal)) { best = s; break; }
-            best ??= s;
-        }
-        if (best?["location"] is not JsonObject location) return null;
-        string? uri = location["uri"]?.GetValue<string>();
-        JsonNode? start = location["range"]?["start"];
-        if (uri is null || start is null) return null;
-        return (uri, start.DeepClone());
-    }
-
-    private static JsonObject Pos(int line, int character) => new() { ["line"] = line, ["character"] = character };
 
     private static string Report(string action, IReadOnlyList<string> changed)
     {

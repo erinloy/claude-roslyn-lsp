@@ -27,11 +27,14 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Shared bridge: workspace-discovery env var + the daemon connect/broker + the request/response LSP client. -->
+    <!-- Shared bridge: workspace-discovery env var + the daemon connect/broker + the request/response LSP client +
+         the shared Roslyn operations (RoslynOps) and on-disk edit application (LspEdits) the CLI also drives. -->
     <Compile Include="../bridge/SolutionLocator.cs" Link="SolutionLocator.cs" />
     <Compile Include="../bridge/PipeKey.cs" Link="PipeKey.cs" />
     <Compile Include="../bridge/DaemonConnector.cs" Link="DaemonConnector.cs" />
     <Compile Include="../bridge/RoslynDaemonClient.cs" Link="RoslynDaemonClient.cs" />
+    <Compile Include="../bridge/LspEdits.cs" Link="LspEdits.cs" />
+    <Compile Include="../bridge/RoslynOps.cs" Link="RoslynOps.cs" />
   </ItemGroup>
 
 </Project>

@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- `crlsp` — the command-line face of the warm shared Roslyn daemon. Skills and scripts get find-references / rename /
+       format / symbol-search WITHOUT spinning up their own MSBuildWorkspace: the CLI is a thin client of the SAME daemon
+       the LSP and the refactor MCP drive (N callers → 1× solution). Built once + `dotnet exec`'d (never `dotnet run`),
+       exactly like the client/daemon, so concurrent invocations never race a build lock. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RollForward>LatestMajor</RollForward>
+    <!-- ConsoleAppFramework v5's generated CLI uses C# 13 language features. -->
+    <LangVersion>13.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>crlsp</AssemblyName>
+    <RootNamespace>ClaudeRoslynLsp.Cli</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- VENDORED ConsoleAppFramework (___/external/consoleappframework), per the repo directive that anything on the
+         command line uses it. Zero-dependency source generator (no runtime assembly) — Analyzer, ReferenceOutputAssembly
+         false. It generates the subcommand routing, the help text, and a Ctrl-C-wired CancellationToken from the methods. -->
+    <ProjectReference Include="../../___/external/consoleappframework/src/ConsoleAppFramework/ConsoleAppFramework.csproj"
+                      OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Zero-serialization shared-memory IPC (erinloy/Sluice) — the CLI↔daemon transport (ShmFrameChannel). -->
+    <ProjectReference Include="../../___/external/Sluice/src/Sluice/Sluice.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- One source of truth — the same broker the refactor MCP uses: connect/spawn the daemon, drive it with LSP
+         requests (RoslynDaemonClient), the shared operations (RoslynOps), and on-disk edit application (LspEdits). -->
+    <Compile Include="../bridge/SolutionLocator.cs" Link="SolutionLocator.cs" />
+    <Compile Include="../bridge/PipeKey.cs" Link="PipeKey.cs" />
+    <Compile Include="../bridge/DaemonConnector.cs" Link="DaemonConnector.cs" />
+    <Compile Include="../bridge/RoslynDaemonClient.cs" Link="RoslynDaemonClient.cs" />
+    <Compile Include="../bridge/LspEdits.cs" Link="LspEdits.cs" />
+    <Compile Include="../bridge/RoslynOps.cs" Link="RoslynOps.cs" />
+  </ItemGroup>
+
+</Project>
