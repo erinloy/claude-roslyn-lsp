@@ -13,6 +13,49 @@ public static class RoslynOps
     public readonly record struct RefLoc(string Path, int Line, int Col);
     public readonly record struct SymbolHit(string Name, string Container, int Kind, string Path, int Line, int Col);
     public readonly record struct DocSymbol(string Name, int Kind, int Line, int Col, int Depth);
+    public readonly record struct Diag(int Line, int Col, int Severity, string Code, string Message);
+
+    /// <summary>Pull diagnostics for one document (textDocument/diagnostic — Roslyn serves PULL, not push). Roslyn only
+    /// computes diagnostics for OPEN documents, so we didOpen the file's current disk content, pull, then didClose.
+    /// Returns the items from a full report; an "unchanged" report (no items) yields an empty list.</summary>
+    public static async Task<IReadOnlyList<Diag>> DiagnosticsAsync(
+        RoslynDaemonClient client, string file, CancellationToken ct)
+    {
+        string uri = LspEdits.PathToUri(file);
+        string text = File.Exists(file) ? File.ReadAllText(file) : "";
+        string langId = file.EndsWith(".vb", StringComparison.OrdinalIgnoreCase) ? "vb" : "csharp";
+        client.Notify("textDocument/didOpen", new JsonObject
+        {
+            ["textDocument"] = new JsonObject { ["uri"] = uri, ["languageId"] = langId, ["version"] = 1, ["text"] = text },
+        });
+        try
+        {
+            JsonNode? res = await client.RequestAsync("textDocument/diagnostic",
+                new JsonObject { ["textDocument"] = new JsonObject { ["uri"] = uri } }, ct).ConfigureAwait(false);
+            return ParseDiagnostics(res);
+        }
+        finally
+        {
+            client.Notify("textDocument/didClose", new JsonObject { ["textDocument"] = new JsonObject { ["uri"] = uri } });
+        }
+    }
+
+    private static IReadOnlyList<Diag> ParseDiagnostics(JsonNode? res)
+    {
+        var list = new List<Diag>();
+        if (res?["items"] is JsonArray arr)
+            foreach (JsonNode? d in arr)
+            {
+                JsonNode? start = d?["range"]?["start"];
+                list.Add(new Diag(
+                    start?["line"]?.GetValue<int>() ?? -1,
+                    start?["character"]?.GetValue<int>() ?? -1,
+                    d?["severity"]?.GetValue<int>() ?? 0,
+                    d?["code"]?.ToString() ?? "",
+                    d?["message"]?.GetValue<string>() ?? ""));
+            }
+        return list;
+    }
 
     /// <summary>Every reference to the symbol at a 0-based (line, col) in a file, including the declaration.</summary>
     public static async Task<IReadOnlyList<RefLoc>> FindReferencesAsync(

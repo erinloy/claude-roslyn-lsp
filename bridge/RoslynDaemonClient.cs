@@ -17,19 +17,22 @@ public sealed class RoslynDaemonClient : IAsyncDisposable
     private readonly ConcurrentDictionary<long, TaskCompletionSource<JsonNode?>> _pending = new();
     private readonly CancellationTokenSource _closed = new();
     private readonly object _writeGate = new();   // ShmRing is single-producer per direction — serialise our writes
+    private Action<JsonNode>? _onNotification;     // server→client notifications (e.g. textDocument/publishDiagnostics)
     private long _nextId;
 
     private RoslynDaemonClient(IFrameChannel channel) => _channel = channel;
 
     /// <summary>Connect to the workspace daemon (starting it if needed) and complete the LSP initialize handshake.</summary>
+    /// <param name="onNotification">Optional sink for server→client notifications (diagnostics, progress, logs).</param>
     public static async Task<RoslynDaemonClient?> ConnectAsync(
-        string root, string? solution, string pluginRoot, Action<string> log, CancellationToken ct = default)
+        string root, string? solution, string pluginRoot, Action<string> log, CancellationToken ct = default,
+        Action<JsonNode>? onNotification = null)
     {
         string endpoint = PipeKey.ForRoot(root);
         IFrameChannel? ch = await DaemonConnector.ConnectAsync(endpoint, root, solution, pluginRoot, log).ConfigureAwait(false);
         if (ch is null) return null;
 
-        var c = new RoslynDaemonClient(ch);
+        var c = new RoslynDaemonClient(ch) { _onNotification = onNotification };
         // Announce our PID so the daemon reaps us when we exit (shared memory has no peer-EOF), then start routing.
         c.WriteFrame(Encoding.UTF8.GetBytes($"{{\"{PipeKey.PidHelloKey}\":{Environment.ProcessId}}}"));
         new Thread(c.ReadLoop) { IsBackground = true, Name = "crlsp-daemonclient-rd" }.Start();
@@ -83,6 +86,8 @@ public sealed class RoslynDaemonClient : IAsyncDisposable
                     if (node?["id"] is { } idNode && node["method"] is null
                         && long.TryParse(idNode.ToString(), out long id) && _pending.TryRemove(id, out var tcs))
                         tcs.TrySetResult(node["result"]);
+                    else if (node?["method"] is not null && node["id"] is null && _onNotification is { } sink)
+                        try { sink(node); } catch { } // a notification (diagnostics/progress/log) — never let a sink throw kill the loop
                 }
             }
         }

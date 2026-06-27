@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using ClaudeRoslynLsp.Bridge;
 using ConsoleAppFramework;
 
@@ -89,6 +90,90 @@ public sealed class CrlspCommands
         bool changed = await RoslynOps.FormatAsync(c, file, ct);
         Console.WriteLine(changed ? $"formatted (written): {file}" : $"no formatting changes: {file}");
     }
+
+    /// <summary>Pull diagnostics (errors/warnings) for a document — what the LSP edit-feedback shows.</summary>
+    /// <param name="file">Path to the .cs/.vb file (absolute, or relative to the workspace root).</param>
+    [Command("diag")]
+    public async Task Diag([Argument] string file, CancellationToken ct)
+    {
+        await using var c = await Connect(ct);
+        var diags = await RoslynOps.DiagnosticsAsync(c, file, ct);
+        if (diags.Count == 0) { Console.WriteLine($"no diagnostics: {file}"); return; }
+        Console.WriteLine($"diagnostics ({diags.Count}):");
+        foreach (var d in diags)
+            Console.WriteLine($"  {SevName(d.Severity),-7} :{d.Line}:{d.Col} {d.Code}: {d.Message}");
+    }
+
+    /// <summary>Probe the PUSH path: open a file, then print the publishDiagnostics the daemon broadcasts back (the same
+    /// notification Claude Code consumes for edit-feedback). With --apply, mid-stream it writes another file's content to
+    /// disk and sends didChange — exercising the daemon's disk-resync edit path. Verifies the pull→push diagnostics bridge.</summary>
+    /// <param name="file">Path to the .cs/.vb file.</param>
+    /// <param name="seconds">How long to watch for broadcasts before printing the latest.</param>
+    /// <param name="apply">Optional path whose content is written over <paramref name="file"/> mid-watch (then didChange), to test edit feedback.</param>
+    [Command("watchdiag")]
+    public async Task WatchDiag([Argument] string file, int seconds = 8, string? apply = null, CancellationToken ct = default)
+    {
+        string uri = LspEdits.PathToUri(file);
+        int rounds = 0;
+        List<string> latest = new();
+        void OnNote(JsonNode n)
+        {
+            if (n["method"]?.GetValue<string>() != "textDocument/publishDiagnostics") return;
+            if (!string.Equals(n["params"]?["uri"]?.GetValue<string>(), uri, StringComparison.OrdinalIgnoreCase)) return;
+            var lines = new List<string>();
+            foreach (JsonNode? d in n["params"]?["diagnostics"]?.AsArray() ?? new JsonArray())
+            {
+                JsonNode? start = d?["range"]?["start"];
+                lines.Add($"  {SevName(d?["severity"]?.GetValue<int>() ?? 0),-7} :{start?["line"]?.GetValue<int>()}:{start?["character"]?.GetValue<int>()} {d?["code"]}: {d?["message"]?.GetValue<string>()}");
+            }
+            rounds++;
+            latest = lines;
+            Console.WriteLine($"[push #{rounds}] {(lines.Count == 0 ? "0 diagnostics" : $"{lines.Count} diagnostic(s)")}");
+            lines.ForEach(Console.WriteLine);
+        }
+
+        string root = Environment.GetEnvironmentVariable("CLAUDE_ROSLYN_WORKSPACE_ROOT") ?? Directory.GetCurrentDirectory();
+        string? solution = Environment.GetEnvironmentVariable(SolutionLocator.OverrideEnvVar);
+        string pluginRoot = Environment.GetEnvironmentVariable("CLAUDE_PLUGIN_ROOT")
+            ?? Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+        Action<string> log = s => Console.Error.WriteLine($"[crlsp] {s}");
+
+        await using var c = await RoslynDaemonClient.ConnectAsync(root, solution, pluginRoot, log, ct, OnNote)
+            ?? throw new InvalidOperationException("could not reach or start the shared Roslyn daemon");
+
+        // Open the doc — the daemon's bridge pulls diagnostics and broadcasts publishDiagnostics back to us.
+        string text = File.Exists(file) ? File.ReadAllText(file) : "";
+        string langId = file.EndsWith(".vb", StringComparison.OrdinalIgnoreCase) ? "vb" : "csharp";
+        c.Notify("textDocument/didOpen", new JsonObject
+        {
+            ["textDocument"] = new JsonObject { ["uri"] = uri, ["languageId"] = langId, ["version"] = 1, ["text"] = text },
+        });
+
+        // Optionally simulate an edit: write new content to disk, then didChange (the daemon re-reads disk, not our buffer).
+        if (apply is not null)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(Math.Min(4, seconds / 2)), ct).ConfigureAwait(false);
+            File.WriteAllText(file, File.ReadAllText(apply));
+            Console.WriteLine($"[edit] wrote {apply} → {file}, sending didChange");
+            c.Notify("textDocument/didChange", new JsonObject
+            {
+                ["textDocument"] = new JsonObject { ["uri"] = uri, ["version"] = 2 },
+                ["contentChanges"] = new JsonArray(new JsonObject { ["text"] = File.ReadAllText(file) }),
+            });
+        }
+
+        await Task.Delay(TimeSpan.FromSeconds(seconds), ct).ConfigureAwait(false);
+        c.Notify("textDocument/didClose", new JsonObject { ["textDocument"] = new JsonObject { ["uri"] = uri } });
+
+        if (rounds == 0) Console.WriteLine($"NO publishDiagnostics within {seconds}s: {file}");
+        else Console.WriteLine($"final: {latest.Count} diagnostic(s) after {rounds} push(es)");
+    }
+
+    /// <summary>LSP DiagnosticSeverity (1-4) → name.</summary>
+    private static string SevName(int s) => s switch
+    {
+        1 => "error", 2 => "warning", 3 => "info", 4 => "hint", _ => $"sev{s}",
+    };
 
     /// <summary>Connect to (or start) the shared Roslyn daemon for the current workspace — same derivation as the MCP.</summary>
     private static async Task<RoslynDaemonClient> Connect(CancellationToken ct)

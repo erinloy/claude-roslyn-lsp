@@ -30,8 +30,11 @@ internal sealed class LspMultiplexer
 
     private readonly TaskCompletionSource<JsonObject> _initResult = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly ConcurrentDictionary<long, (ClientSession session, JsonNode? originalId)> _pending = new();
+    private readonly ConcurrentDictionary<long, TaskCompletionSource<JsonNode?>> _internalPending = new(); // daemon's own LS requests (diagnostic pulls)
     private readonly ConcurrentDictionary<int, ClientSession> _clients = new();
     private readonly ConcurrentDictionary<string, int> _openDocs = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, int> _docVersions = new(StringComparer.Ordinal);          // monotonic didChange version per open doc
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> _diagDebounce = new(StringComparer.Ordinal);
     private long _nextGlobalId = 1; // 0 reserved for the daemon's own initialize
     private int _nextClientId = 0;
 
@@ -101,6 +104,7 @@ internal sealed class LspMultiplexer
                     // Response from the LS → route to the owning client (or capture the daemon's init result).
                     long? gid = ParseId(idNode);
                     if (gid == 0) { _initResult.TrySetResult(json["result"]?.AsObject() ?? new JsonObject()); continue; }
+                    if (gid is long ig && _internalPending.TryRemove(ig, out var itcs)) { itcs.TrySetResult(json["result"]); continue; }
                     if (gid is long g && _pending.TryRemove(g, out var p))
                     {
                         JsonObject clone = json.DeepClone()!.AsObject();
@@ -136,6 +140,11 @@ internal sealed class LspMultiplexer
         // registerCapability / unregisterCapability / workDoneProgress/create / *refresh / default → null result.
         var response = new JsonObject { ["jsonrpc"] = "2.0", ["id"] = idNode.DeepClone(), ["result"] = result };
         await _lsWriter.WriteJsonAsync(response, _ct).ConfigureAwait(false);
+
+        // Roslyn computes diagnostics asynchronously and signals "they changed, re-pull" via this refresh request. That
+        // is our cue to re-pull every open doc and push fresh publishDiagnostics — the event that makes edit-feedback land.
+        if (method == "workspace/diagnostic/refresh")
+            foreach (string uri in _openDocs.Keys) TriggerDiagnostics(uri, resyncFromDisk: false);
     }
 
     private async Task BroadcastAsync(LspMessage msg)
@@ -185,11 +194,17 @@ internal sealed class LspMultiplexer
             case "textDocument/didOpen":
             case "textDocument/didClose":
                 await HandleDocSyncAsync(method, json).ConfigureAwait(false);
+                // A freshly-opened doc gets an immediate pull (often empty until the server computes) — the real set
+                // arrives via the server's diagnostic/refresh. No disk resync: didOpen already carried the content.
+                if (method == "textDocument/didOpen" && DocUri(json) is { } ou) TriggerDiagnostics(ou, resyncFromDisk: false);
                 return;
 
             case "textDocument/didChange":
             case "textDocument/didSave":
-                return; // disk is the source of truth; the LS file-watches
+                // We don't forward the client's buffer (disk stays the single source of truth — multi-agent safe).
+                // Instead, re-sync the server's view from DISK and pull→publish diagnostics so edit feedback flows.
+                if (DocUri(json) is { } cu) TriggerDiagnostics(cu, resyncFromDisk: true);
+                return;
 
             default:
                 if (idNode is not null && method is not null)
@@ -224,10 +239,123 @@ internal sealed class LspMultiplexer
             if (after <= 0)
             {
                 _openDocs.TryRemove(uri, out _);
+                // Cancel any in-flight diagnostics work so a debounced resync/pull can't reach the server AFTER didClose
+                // (a didChange/diagnostic for a closed document is a protocol violation the server may abort on).
+                if (_diagDebounce.TryRemove(uri, out var cts)) { try { cts.Cancel(); cts.Dispose(); } catch { } }
+                _docVersions.TryRemove(uri, out _);
                 await _lsWriter.WriteJsonAsync(json.DeepClone()!, _ct).ConfigureAwait(false);
             }
             else _openDocs[uri] = after;
         }
+    }
+
+    // ---- diagnostics bridge: pull (Roslyn) → publish (clients) ----------------------------------------------------
+    // Microsoft.CodeAnalysis.LanguageServer serves PULL diagnostics (textDocument/diagnostic) and computes them only for
+    // OPEN documents; Claude Code consumes PUSH (publishDiagnostics). This bridges the two: on open/edit, re-sync the
+    // server's open buffer from DISK (the single source of truth — so concurrent agents never diverge), pull the
+    // document's diagnostics, and broadcast them to every client as a publishDiagnostics notification.
+
+    private static string? DocUri(JsonNode json) => json["params"]?["textDocument"]?["uri"]?.GetValue<string>();
+
+    /// <summary>Debounced diagnostics refresh for a URI — coalesces a burst of edits into one pull+publish.
+    /// <paramref name="resyncFromDisk"/> is true ONLY for client edits (didChange/didSave): it re-syncs the server's open
+    /// buffer from disk. Refresh- and open-driven pulls pass false — a didChange there would make the server emit another
+    /// refresh, looping forever.</summary>
+    private void TriggerDiagnostics(string uri, bool resyncFromDisk)
+    {
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(_ct);
+        if (_diagDebounce.TryRemove(uri, out var old)) { try { old.Cancel(); old.Dispose(); } catch { } }
+        _diagDebounce[uri] = cts;
+        _ = Task.Run(async () =>
+        {
+            try { await Task.Delay(150, cts.Token).ConfigureAwait(false); }
+            catch { return; } // superseded by a newer edit
+            try { await PublishDiagnosticsForAsync(uri, resyncFromDisk, cts.Token).ConfigureAwait(false); }
+            catch (Exception ex) { _log($"diagnostics publish failed for {uri}: {ex.Message}"); }
+            finally { if (_diagDebounce.TryGetValue(uri, out var cur) && ReferenceEquals(cur, cts)) _diagDebounce.TryRemove(uri, out _); }
+        });
+    }
+
+    private async Task PublishDiagnosticsForAsync(string uri, bool resyncFromDisk, CancellationToken ct)
+    {
+        if (!_openDocs.ContainsKey(uri)) return; // only open docs yield pull diagnostics
+
+        // 1. On a client edit, re-sync the server's buffer from DISK (Claude edits land on disk first; disk is the shared
+        //    truth). NOT on refresh/open pulls — re-syncing there would loop. We replace the buffer with a didClose+didOpen
+        //    rather than a full-document didChange: this Roslyn build's DidChange handler assumes INCREMENTAL changes and
+        //    NREs (crashing its request queue) on a range-less full change. didOpen always carries the whole text, no range.
+        if (resyncFromDisk)
+        {
+            string path = UriToPath(uri);
+            if (File.Exists(path))
+            {
+                string text = File.ReadAllText(path);
+                string langId = path.EndsWith(".vb", StringComparison.OrdinalIgnoreCase) ? "vb" : "csharp";
+                int version = _docVersions.AddOrUpdate(uri, 2, (_, v) => v + 1);
+                await _lsWriter.WriteJsonAsync(Notify("textDocument/didClose",
+                    new JsonObject { ["textDocument"] = new JsonObject { ["uri"] = uri } }), ct).ConfigureAwait(false);
+                await _lsWriter.WriteJsonAsync(Notify("textDocument/didOpen", new JsonObject
+                {
+                    ["textDocument"] = new JsonObject { ["uri"] = uri, ["languageId"] = langId, ["version"] = version, ["text"] = text },
+                }), ct).ConfigureAwait(false);
+            }
+        }
+
+        // 2. Pull diagnostics. A pull right after a didChange can come back as a ServerCancelled error (the server is
+        //    still recomputing) — surfaced here as a null/kind-less result. Retry a few times before giving up; the
+        //    refresh hook is the other path that re-pulls once the server signals completion.
+        JsonNode? result = null;
+        string? kind = null;
+        for (int attempt = 0; attempt < 5; attempt++)
+        {
+            if (!_openDocs.ContainsKey(uri)) return; // closed mid-retry — stop touching it
+            result = await PullDiagnosticsOnceAsync(uri, ct).ConfigureAwait(false);
+            kind = result?["kind"]?.GetValue<string>();
+            if (kind is "full" or "unchanged") break;           // a real report
+            try { await Task.Delay(250, ct).ConfigureAwait(false); } catch { return; }
+        }
+
+        // 3. A "full" report carries the current item set (empty = clear); "unchanged"/no-report → leave clients as-is.
+        if (kind != "full") { _log($"diag[{(resyncFromDisk ? "edit" : "open/refresh")}] {uri} → no report (kind={kind}) — skip"); return; }
+        JsonArray items = (result!["items"] as JsonArray)?.DeepClone()?.AsArray() ?? new JsonArray();
+        _log($"diag[{(resyncFromDisk ? "edit" : "open/refresh")}] {uri} → {items.Count} item(s)");
+        await BroadcastJsonAsync(Notify("textDocument/publishDiagnostics", new JsonObject
+        {
+            ["uri"] = uri,
+            ["diagnostics"] = items,
+        })).ConfigureAwait(false);
+    }
+
+    /// <summary>One textDocument/diagnostic round-trip; returns the raw report result (null on error/timeout).</summary>
+    private async Task<JsonNode?> PullDiagnosticsOnceAsync(string uri, CancellationToken ct)
+    {
+        long pid = Interlocked.Increment(ref _nextGlobalId);
+        var tcs = new TaskCompletionSource<JsonNode?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _internalPending[pid] = tcs;
+        await _lsWriter.WriteJsonAsync(new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = pid,
+            ["method"] = "textDocument/diagnostic",
+            ["params"] = new JsonObject { ["textDocument"] = new JsonObject { ["uri"] = uri } },
+        }, ct).ConfigureAwait(false);
+        try { return await tcs.Task.WaitAsync(TimeSpan.FromSeconds(15), ct).ConfigureAwait(false); }
+        catch { _internalPending.TryRemove(pid, out _); return null; }
+    }
+
+    private async Task BroadcastJsonAsync(JsonObject json)
+    {
+        byte[] raw = Encoding.UTF8.GetBytes(json.ToJsonString());
+        foreach (var c in _clients.Values)
+        {
+            try { await c.SendRawAsync(raw).ConfigureAwait(false); }
+            catch { /* a dead client gets reaped by its own read loop */ }
+        }
+    }
+
+    private static string UriToPath(string uri)
+    {
+        try { return new Uri(uri).LocalPath; } catch { return uri; }
     }
 
     internal void OnSessionEnded(ClientSession session) => RemoveClient(session);
@@ -269,6 +397,9 @@ internal sealed class LspMultiplexer
                         ["configuration"] = true,
                         ["workspaceFolders"] = true,
                         ["symbol"] = new JsonObject(),       // workspace/symbol — resolve a type/namespace by name
+                        // refreshSupport → the server tells us (workspace/diagnostic/refresh) when diagnostics recompute,
+                        // so the bridge re-pulls at the right moment instead of racing the async computation.
+                        ["diagnostics"] = new JsonObject { ["refreshSupport"] = true },
                     },
                     ["textDocument"] = new JsonObject
                     {
@@ -279,6 +410,7 @@ internal sealed class LspMultiplexer
                         ["references"] = new JsonObject(),
                         ["rename"] = new JsonObject(),       // textDocument/rename — solution-wide rename
                         ["formatting"] = new JsonObject(),   // textDocument/formatting — whole-document format
+                        ["diagnostic"] = new JsonObject { ["dynamicRegistration"] = false }, // pull diagnostics (textDocument/diagnostic)
                     },
                 },
             },
@@ -365,12 +497,15 @@ internal sealed class ClientSession
                     _channel.AdvanceFrame();
                     if (raw.Length == 0) { return; }            // disconnect sentinel
                     if (TryHandleHello(raw)) continue;          // PID announce — not an LSP message
-                    _mux.HandleClientMessageAsync(this, new LspMessage { Raw = raw }).GetAwaiter().GetResult();
+                    // A single malformed/unexpected message must not tear down the session (and, when this is the only
+                    // client, take the whole daemon with it). Log and keep pumping.
+                    try { _mux.HandleClientMessageAsync(this, new LspMessage { Raw = raw }).GetAwaiter().GetResult(); }
+                    catch (Exception ex) { _log($"client {Id} message handler error (continuing): {ex}"); }
                 }
             }
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { _log($"client {Id} read loop ended: {ex.Message}"); }
+        catch (Exception ex) { _log($"client {Id} read loop ended ({ex.GetType().Name})"); }
         finally { _mux.OnSessionEnded(this); Close(); }
     }
 
