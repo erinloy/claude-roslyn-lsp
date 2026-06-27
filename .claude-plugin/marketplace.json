@@ -33,7 +33,6 @@
           "initializationOptions": {},
           "settings": {},
           "startupTimeout": 180000,
-          "shutdownTimeout": 15000,
           "maxRestarts": 3
         }
       }
