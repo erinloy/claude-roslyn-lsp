@@ -43,6 +43,36 @@ Implement `ICrlspExtension` (lifecycle) plus any capability interface for the su
 | `IDiagnosticExtension` | live state merged into a file's diagnostics | daemon |
 | `IHoverExtension` | live state on hover | daemon |
 
+A minimal extension that surfaces a running system's catalog through `workspaceSymbol`:
+
+```csharp
+using ClaudeRoslynLsp.Extensions;
+
+public sealed class OrdersExtension : ICrlspExtension, ISymbolExtension
+{
+    public string Name => "orders";
+    private readonly OrdersClient _client = new();   // your own HTTP/Sluice/pipe client
+
+    public Task InitializeAsync(ExtensionContext ctx, CancellationToken ct)
+    {
+        var endpoint = ctx.Config?["endpoint"]?.GetValue<string>() ?? "http://localhost:8080";
+        _client.Connect(endpoint, ctx.Log);          // dial out; stay resilient if it's down
+        return Task.CompletedTask;
+    }
+
+    public async Task<IReadOnlyList<ExtSymbol>> GetWorkspaceSymbolsAsync(string query, CancellationToken ct)
+        => (await _client.SearchAsync(query, ct))
+           .Select(e => new ExtSymbol(e.Name, ExtSymbolKind.Property, "orders", $"orders://{e.Id}"))
+           .ToList();
+
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+}
+```
+
+`InitializeAsync` receives an `ExtensionContext`: `WorkspaceRoot`, `Host` (`"daemon"` or `"mcp"`, so one
+extension can behave per-surface), `Log` (to the host's log, never the protocol wire), your manifest `Config`, and
+`RequestDiagnosticRefresh` (the streams push below; `null` under the MCP host).
+
 ### Subscribable streams
 
 For **STREAMS** — pushing the running system's change-events to the agent — there is no separate interface. In
@@ -65,7 +95,7 @@ stand-in for a running system) — it is exercised by the extension-loading test
 
 Two reasons you rarely need to restart anything:
 
-1. **The extension dials out, so most changes need no rebuild at all.** New organs, programs, or data in the running system
+1. **The extension dials out, so most changes need no rebuild at all.** New entities, jobs, or data in the running system
    flow through live — `workspaceSymbol` and the query tools fetch the catalog/data from the system on each call. You only
    rebuild the extension when the *bridge code* changes (a new tool, a changed capability mapping).
 

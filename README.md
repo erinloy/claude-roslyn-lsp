@@ -162,6 +162,14 @@ dotnet exec daemon/bin/Release/net8.0/ClaudeRoslynLsp.Daemon.dll --root /path/to
 dotnet run --project bridge/ClaudeRoslynLsp.Bridge.csproj -- --capabilities
 ```
 
+## Documentation
+
+- This README — overview, install, the LSP-tool setup, configuration, and running by hand.
+- [extensions-api/README.md](extensions-api/README.md) — the extension contract: manifest, the capability interfaces, a minimal skeleton, subscribable streams, and hot-reload, for surfacing a running system through the LSP.
+- [skills/roslyn-refactoring/SKILL.md](skills/roslyn-refactoring/SKILL.md) — when and how to use the refactoring MCP tools.
+- [samples/SampleRunningSystemExtension/](samples/SampleRunningSystemExtension/) — a complete, runnable example extension.
+- The contract types carry XML doc comments inline in [extensions-api/Extensions.cs](extensions-api/Extensions.cs) (every interface and DTO).
+
 ## Layout
 
 ```

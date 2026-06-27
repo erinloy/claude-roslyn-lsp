@@ -7,7 +7,7 @@ namespace ClaudeRoslynLsp.Extensions;
 /// The contract a claude-roslyn-lsp extension implements. Extensions are declared in <c>.claude-roslyn/extensions.json</c>
 /// at a workspace root and loaded by the LSP daemon and/or the MCP server. Their purpose is to give the agent visibility
 /// into a RUNNING SYSTEM (not just the static codebase): an extension dials OUT to that system itself and surfaces it as
-/// MCP tools, diagnostics, and hover. The open-source LSP stays entirely system-agnostic — every system-specific detail
+/// MCP tools, diagnostics, and hover. The LSP plugin stays entirely system-agnostic — every system-specific detail
 /// (the endpoint, the protocol, the data shape) lives in the extension and its manifest <c>config</c> block.
 ///
 /// Implement the opt-in capability interfaces alongside this one for each surface you want to contribute:
