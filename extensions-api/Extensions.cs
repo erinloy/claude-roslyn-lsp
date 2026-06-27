@@ -61,8 +61,8 @@ public interface IMcpToolExtension
 }
 
 /// <summary>Opt-in: contribute workspace symbols (SYMBOLS) from the running system's catalog, so a <c>workspaceSymbol</c>
-/// query reaches beyond code into the attached model — e.g. a Matrix instance's organs (<c>body/predictions</c>,
-/// <c>channel/funding</c>, <c>corpus/combined</c>) and runnable programs. Merged with Roslyn's workspace symbols by the
+/// query reaches beyond code into the live system — e.g. a service's entities (<c>queue/depth</c>,
+/// <c>worker/3</c>, <c>cache/users</c>) and runnable jobs. Merged with Roslyn's workspace symbols by the
 /// daemon. Each returned symbol's <see cref="ExtSymbol.LocationUri"/> is a provider-owned URI the agent can read back via
 /// the extension's query tool — that's the SYMBOLS→QUERIES bridge.</summary>
 public interface ISymbolExtension
@@ -70,8 +70,8 @@ public interface ISymbolExtension
     Task<IReadOnlyList<ExtSymbol>> GetWorkspaceSymbolsAsync(string query, CancellationToken ct);
 }
 
-/// <summary>Opt-in: contribute diagnostics for a document from the running system — e.g. flag that the actuator a file
-/// defines is live and breaching a limit. Merged into the file's normal Roslyn diagnostics by the daemon.</summary>
+/// <summary>Opt-in: contribute diagnostics for a document from the running system — e.g. flag that the service a file
+/// defines is live and over a threshold. Merged into the file's normal Roslyn diagnostics by the daemon.</summary>
 public interface IDiagnosticExtension
 {
     Task<IReadOnlyList<ExtDiagnostic>> GetDiagnosticsAsync(string fileUri, string filePath, CancellationToken ct);
@@ -90,7 +90,7 @@ public readonly record struct ExtDiagnostic(
 public enum ExtSeverity { Error = 1, Warning = 2, Information = 3, Hint = 4 }
 
 /// <summary>A workspace symbol an extension contributes. <paramref name="LocationUri"/> is a provider-owned URI (e.g.
-/// <c>matrix://body/predictions</c>) the agent can read back via the extension's query tool; <paramref name="Line"/>/
+/// <c>system://queue/depth</c>) the agent can read back via the extension's query tool; <paramref name="Line"/>/
 /// <paramref name="Character"/> anchor a position within it (0-based, default 0). <paramref name="Kind"/> mirrors LSP
 /// SymbolKind for sensible client iconography/grouping.</summary>
 public readonly record struct ExtSymbol(

@@ -11,7 +11,7 @@ namespace SampleRunningSystemExtension;
 /// Reference extension showing the full shape of a claude-roslyn-lsp extension: it contributes an MCP tool that reports
 /// LIVE state from a running system. Here the "running system" is just this host process (so the sample is self-contained
 /// and needs nothing external) — a real extension dials OUT to the actual system named in its manifest <c>config</c>
-/// (e.g. Matrix's HTTP API) and reports that instead.
+/// (e.g. a service's HTTP API) and reports that instead.
 ///
 /// Manifest (<c>.claude-roslyn/extensions.json</c>):
 /// <code>
@@ -30,7 +30,7 @@ public sealed class SampleExtension : ICrlspExtension, IMcpToolExtension, IDiagn
     private readonly SampleSystemClient _client = new();
 
     // ISymbolExtension: surface the running system's catalog so workspaceSymbol reaches into it. The sample returns two
-    // stand-in "organs"; a real extension returns its live catalog (e.g. Matrix's system/paths organs) filtered by query.
+    // stand-in entities; a real extension returns its live catalog (e.g. the system's resource list) filtered by query.
     public Task<IReadOnlyList<ExtSymbol>> GetWorkspaceSymbolsAsync(string query, CancellationToken ct)
     {
         var all = new[]
@@ -50,8 +50,8 @@ public sealed class SampleExtension : ICrlspExtension, IMcpToolExtension, IDiagn
         => Task.FromResult<string?>($"**running system** — {_client.OneLineStatus()}");
 
     // IDiagnosticExtension: merge a live-system signal into a file's diagnostics. The sample surfaces the running system's
-    // status as an info diagnostic at the top of every C# file; a real extension would, e.g., flag that the actuator a
-    // file defines is live and breaching a limit, anchored at the relevant line.
+    // status as an info diagnostic at the top of every C# file; a real extension would, e.g., flag that the service a
+    // file defines is live and over a threshold, anchored at the relevant line.
     public Task<IReadOnlyList<ExtDiagnostic>> GetDiagnosticsAsync(string fileUri, string filePath, CancellationToken ct)
     {
         if (!filePath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
@@ -68,7 +68,7 @@ public sealed class SampleExtension : ICrlspExtension, IMcpToolExtension, IDiagn
         string endpoint = context.Config?["endpoint"]?.GetValue<string>() ?? "self";
         context.Log($"attaching to running system '{endpoint}' (host={context.Host}, root={context.WorkspaceRoot})");
         _client.Attach(endpoint, context.Log);
-        // STREAMS demo: a real extension subscribes to its running system (e.g. Matrix's watch/Fusion push) and calls
+        // STREAMS demo: a real extension subscribes to its running system (e.g. a change feed or websocket) and calls
         // RequestDiagnosticRefresh on every change so the new live state re-publishes through per-client routing. The
         // sample stands in for that change-stream with a periodic tick (the callback is daemon-host only).
         if (context.RequestDiagnosticRefresh is { } refresh)

@@ -14,11 +14,11 @@ namespace ClaudeRoslynLsp.Extensions;
 /// {
 ///   "extensions": [
 ///     {
-///       "name": "matrix",
-///       "assembly": "src/Matrix/Matrix.LspExtension/bin/Release/net8.0/Matrix.LspExtension.dll",
-///       "type": "Matrix.LspExtension.MatrixExtension",
+///       "name": "orders",
+///       "assembly": "src/Orders.LspExtension/bin/Release/net8.0/Orders.LspExtension.dll",
+///       "type": "Acme.Orders.LspExtension.OrdersExtension",
 ///       "enabled": true,
-///       "config": { "endpoint": "http://localhost:5077" }
+///       "config": { "endpoint": "http://localhost:8080" }
 ///     }
 ///   ]
 /// }
