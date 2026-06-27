@@ -39,21 +39,23 @@ internal sealed class LspMultiplexer
     private long _nextGlobalId = 1; // 0 reserved for the daemon's own initialize
     private int _nextClientId = 0;
 
-    private readonly IReadOnlyList<IDiagnosticExtension> _diagExtensions;
-    private readonly IReadOnlyList<IHoverExtension> _hoverExtensions;
-    private readonly IReadOnlyList<ISymbolExtension> _symbolExtensions;
+    // Accessors (not fixed lists) so a hot-reload of an extension takes effect on the next request — the daemon reads the
+    // CURRENT instances from the reloadable host each time, never a cached snapshot.
+    private readonly Func<IReadOnlyList<IDiagnosticExtension>> _diagExtensions;
+    private readonly Func<IReadOnlyList<IHoverExtension>> _hoverExtensions;
+    private readonly Func<IReadOnlyList<ISymbolExtension>> _symbolExtensions;
 
     public LspMultiplexer(Stream lsIn, Stream lsOut, Action<string> log, CancellationToken ct,
-        IReadOnlyList<IDiagnosticExtension>? diagExtensions = null, IReadOnlyList<IHoverExtension>? hoverExtensions = null,
-        IReadOnlyList<ISymbolExtension>? symbolExtensions = null)
+        Func<IReadOnlyList<IDiagnosticExtension>>? diagExtensions = null, Func<IReadOnlyList<IHoverExtension>>? hoverExtensions = null,
+        Func<IReadOnlyList<ISymbolExtension>>? symbolExtensions = null)
     {
         _lsWriter = new LspMessageWriter(lsIn);
         _lsReader = new LspMessageReader(lsOut);
         _log = log;
         _ct = ct;
-        _diagExtensions = diagExtensions ?? Array.Empty<IDiagnosticExtension>();
-        _hoverExtensions = hoverExtensions ?? Array.Empty<IHoverExtension>();
-        _symbolExtensions = symbolExtensions ?? Array.Empty<ISymbolExtension>();
+        _diagExtensions = diagExtensions ?? (static () => Array.Empty<IDiagnosticExtension>());
+        _hoverExtensions = hoverExtensions ?? (static () => Array.Empty<IHoverExtension>());
+        _symbolExtensions = symbolExtensions ?? (static () => Array.Empty<ISymbolExtension>());
     }
 
     /// <summary>STREAMS push primitive handed to extensions: re-pull + re-publish a document's diagnostics (now carrying
@@ -193,7 +195,7 @@ internal sealed class LspMultiplexer
 
         // Hover augmentation: only when an extension contributes hover. Otherwise hover takes the unchanged generic
         // forward path below (zero behaviour change for the common case / a daemon with no hover extensions).
-        if (_hoverExtensions.Count > 0 && method == "textDocument/hover" && idNode is not null)
+        if (_hoverExtensions().Count > 0 && method == "textDocument/hover" && idNode is not null)
         {
             _ = HandleHoverAsync(session, idNode.DeepClone(), json.DeepClone()!.AsObject());
             return;
@@ -201,7 +203,7 @@ internal sealed class LspMultiplexer
 
         // workspaceSymbol augmentation (SYMBOLS): same guard/shape as hover — merge the running system's catalog into
         // Roslyn's results when an extension contributes symbols; otherwise the unchanged generic forward path runs.
-        if (_symbolExtensions.Count > 0 && method == "workspace/symbol" && idNode is not null)
+        if (_symbolExtensions().Count > 0 && method == "workspace/symbol" && idNode is not null)
         {
             _ = HandleWorkspaceSymbolAsync(session, idNode.DeepClone(), json.DeepClone()!.AsObject());
             return;
@@ -414,7 +416,7 @@ internal sealed class LspMultiplexer
         string path; try { path = LspEdits.UriToPath(uri); } catch { path = uri; }
 
         var extras = new List<string>();
-        foreach (IHoverExtension ext in _hoverExtensions)
+        foreach (IHoverExtension ext in _hoverExtensions())
         {
             try
             {
@@ -459,7 +461,7 @@ internal sealed class LspMultiplexer
 
         string query = request["params"]?["query"]?.GetValue<string>() ?? "";
         var merged = roslyn?.DeepClone()?.AsArray() ?? new JsonArray();
-        foreach (ISymbolExtension ext in _symbolExtensions)
+        foreach (ISymbolExtension ext in _symbolExtensions())
         {
             try
             {
@@ -514,10 +516,11 @@ internal sealed class LspMultiplexer
     /// </summary>
     private async Task AugmentWithExtensionsAsync(string uri, JsonArray items, CancellationToken ct)
     {
-        if (_diagExtensions.Count == 0) return;
+        IReadOnlyList<IDiagnosticExtension> diagExtensions = _diagExtensions();
+        if (diagExtensions.Count == 0) return;
         string path;
         try { path = LspEdits.UriToPath(uri); } catch { path = uri; }
-        foreach (IDiagnosticExtension ext in _diagExtensions)
+        foreach (IDiagnosticExtension ext in diagExtensions)
         {
             try
             {
@@ -612,16 +615,6 @@ internal sealed class LspMultiplexer
         }, ct).ConfigureAwait(false);
         try { return await tcs.Task.WaitAsync(TimeSpan.FromSeconds(15), ct).ConfigureAwait(false); }
         catch { _internalPending.TryRemove(pid, out _); return null; }
-    }
-
-    private async Task BroadcastJsonAsync(JsonObject json)
-    {
-        byte[] raw = Encoding.UTF8.GetBytes(json.ToJsonString());
-        foreach (var c in _clients.Values)
-        {
-            try { await c.SendRawAsync(raw).ConfigureAwait(false); }
-            catch { /* a dead client gets reaped by its own read loop */ }
-        }
     }
 
     private static string UriToPath(string uri)

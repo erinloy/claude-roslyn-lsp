@@ -60,8 +60,13 @@ public static class ExtensionLoader
 
             try
             {
-                _probeDirs.TryAdd(Path.GetDirectoryName(asmPath)!, 1); // so its dependencies resolve from beside it
-                Assembly asm = Assembly.LoadFrom(asmPath);
+                // Load from a shadow copy so the ORIGINAL dll is never locked — the author can rebuild it while this host
+                // runs (the rebuilt tools take effect on the host's next start / MCP reconnect). The daemon goes further
+                // and hot-reloads in place (see ReloadableExtensionHost); the MCP host registers tools once at startup, so
+                // here shadow-copy is the win that matters: zero "stop the host to rebuild" friction.
+                string loadPath = ShadowCopyForLoad(asmPath, name, host, log);
+                _probeDirs.TryAdd(Path.GetDirectoryName(loadPath)!, 1); // so its dependencies resolve from beside it
+                Assembly asm = Assembly.LoadFrom(loadPath);
                 Type? type = asm.GetType(typeName!) ?? asm.GetTypes().FirstOrDefault(t => t.FullName == typeName);
                 if (type is null) { log($"extension '{name}' type '{typeName}' not found in {Path.GetFileName(asmPath)} — skipping"); continue; }
                 if (Activator.CreateInstance(type) is not ICrlspExtension ext)
@@ -73,6 +78,30 @@ public static class ExtensionLoader
             catch (Exception ex) { log($"extension '{name}' failed to load: {ex.Message} — skipping"); }
         }
         return result;
+    }
+
+    // Copy the extension's whole output directory to a per-load shadow location and return the copied main dll, so the
+    // original is never memory-mapped/locked by this host. Falls back to the original path if the copy fails.
+    private static string ShadowCopyForLoad(string originalDll, string name, string host, Action<string> log)
+    {
+        try
+        {
+            string srcDir = Path.GetDirectoryName(originalDll)!;
+            string dst = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "claude-roslyn-lsp", "ext-shadow", host, name, Guid.NewGuid().ToString("N")[..8]);
+            Directory.CreateDirectory(dst);
+            foreach (string f in Directory.GetFiles(srcDir))
+            {
+                try { File.Copy(f, Path.Combine(dst, Path.GetFileName(f)), overwrite: true); } catch { /* skip a locked sibling */ }
+            }
+            return Path.Combine(dst, Path.GetFileName(originalDll));
+        }
+        catch (Exception ex)
+        {
+            log($"extension '{name}' shadow-copy failed ({ex.Message}); loading in place — the original dll will be locked");
+            return originalDll;
+        }
     }
 
     // LoadFrom already probes an assembly's own directory; this also resolves dependencies that live alongside ANY loaded

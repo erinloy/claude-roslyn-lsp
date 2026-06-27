@@ -49,36 +49,25 @@ static async Task RunDaemon(
         using var server = RoslynServer.Start(serverDll, logDir, Log);
         Log($"roslyn server pid {server.Id} started");
 
-        // Load repo-declared extensions (.claude-roslyn/extensions.json) and partition them by capability. The daemon
-        // surfaces the running system they dial out to as: diagnostics merged into a file's set, hover, and workspaceSymbol
-        // reaching into the system's catalog (SYMBOLS). Partition first (no init yet) so the mux can carry the capability
-        // lists, then dial each extension out AFTER the mux exists — its STREAMS refresh callback rides the live mux.
-        var loadedExtensions = ExtensionLoader.Load(root, "daemon", Log);
-        var diagExtensions = new List<IDiagnosticExtension>();
-        var hoverExtensions = new List<IHoverExtension>();
-        var symbolExtensions = new List<ISymbolExtension>();
-        foreach (var le in loadedExtensions)
-        {
-            if (le.Extension is IDiagnosticExtension d) diagExtensions.Add(d);
-            if (le.Extension is IHoverExtension h) hoverExtensions.Add(h);
-            if (le.Extension is ISymbolExtension s) symbolExtensions.Add(s);
-        }
-
-        var mux = new LspMultiplexer(server.StandardInput.BaseStream, server.StandardOutput.BaseStream, Log, cts.Token, diagExtensions, hoverExtensions, symbolExtensions);
+        // Repo-declared extensions (.claude-roslyn/extensions.json), HOT-RELOADABLE: each lives in its own collectible load
+        // context loaded from a shadow copy, and a rebuilt dll is swapped in at runtime — no daemon restart. The daemon
+        // surfaces the running system they dial out to as diagnostics, hover, and workspaceSymbol-into-the-catalog (SYMBOLS).
+        // The mux reads the CURRENT instances live via the accessors below, so a reload takes effect on the next request.
+        ReloadableExtensionHost? extHost = null;
+        var mux = new LspMultiplexer(server.StandardInput.BaseStream, server.StandardOutput.BaseStream, Log, cts.Token,
+            () => extHost?.DiagnosticExtensions ?? Array.Empty<IDiagnosticExtension>(),
+            () => extHost?.HoverExtensions ?? Array.Empty<IHoverExtension>(),
+            () => extHost?.SymbolExtensions ?? Array.Empty<ISymbolExtension>());
         await mux.StartAsync(root, solutionOverride).ConfigureAwait(false);
 
-        foreach (var le in loadedExtensions)
-        {
-            try
+        extHost = await ReloadableExtensionHost.StartAsync(root, "daemon", Log,
+            contextFactory: (name, config) => new ExtensionContext
             {
-                await le.Extension.InitializeAsync(new ExtensionContext
-                {
-                    WorkspaceRoot = root, Host = "daemon", Log = Log, Config = le.Config,
-                    RequestDiagnosticRefresh = uri => { mux.RefreshDiagnostics(uri); return Task.CompletedTask; },
-                }, cts.Token).ConfigureAwait(false);
-            }
-            catch (Exception ex) { Log($"extension '{le.Name}' init failed: {ex.Message}"); }
-        }
+                WorkspaceRoot = root, Host = "daemon", Log = Log, Config = config,
+                RequestDiagnosticRefresh = uri => { mux.RefreshDiagnostics(uri); return Task.CompletedTask; },
+            },
+            onReloaded: () => mux.RefreshDiagnostics(null), // re-publish open docs so the reloaded extension's state surfaces
+            ct: cts.Token).ConfigureAwait(false);
 
         var idle = new IdleShutdown(mux, TimeSpan.FromSeconds(idleSeconds), Log, cts);
         idle.Start();
@@ -89,7 +78,7 @@ static async Task RunDaemon(
         await Task.WhenAny(accept, serverExit).ConfigureAwait(false);
 
         cts.Cancel();
-        foreach (var le in loadedExtensions) { try { await le.Extension.DisposeAsync().ConfigureAwait(false); } catch { } }
+        if (extHost is not null) { try { await extHost.DisposeAsync().ConfigureAwait(false); } catch { } }
         try { if (!server.HasExited) server.Kill(entireProcessTree: true); } catch { }
         Log("daemon exiting");
     }
