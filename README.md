@@ -36,7 +36,8 @@ The command Claude spawns is `dotnet` directly (not `bash a-script` — Claude C
 
 ## Requirements
 
-- **.NET 10 SDK** on `PATH` (`dotnet --version` → `10.x`). Required for the file-based-app client (`dotnet run --file`) and for the refactoring MCP's in-process MSBuild.
+- **.NET 10 SDK** on `PATH` (`dotnet --version` → `10.x`). Builds the client + daemon and runs the refactoring MCP's in-process MSBuild. (The client/daemon target `net8.0` with `RollForward` and run on the net10 runtime, so no separate .NET 8 install is needed.)
+- **The Claude Code LSP tool must be patched in** — see [Enabling the LSP tool](#enabling-the-lsp-tool-setup-dependency) below. (Only the *LSP server* needs this; the refactoring MCP works without it.)
 
 ## Install
 
@@ -51,7 +52,28 @@ From a running `claude`:
 
 Then restart Claude Code. **First launch builds the client + daemon and downloads the server (one-time, ~1–2 min);** subsequent launches connect to the already-running daemon instantly. If you run more than one C# LSP plugin, disable the others so only one claims `.cs`.
 
-> Claude Code's built-in LSP tool may need enabling — see [Piebald-AI/claude-code-lsps](https://github.com/Piebald-AI/claude-code-lsps) (`npx tweakcc --apply`) and Claude Code 2.1.50+.
+## Enabling the LSP tool (setup dependency)
+
+Claude Code's builtin **`LSP` tool** (the thing that actually *spawns* a registered `.cs` language server and surfaces diagnostics / go-to-def / find-refs) is gated behind a client patch — tweakcc's **`fix-lsp-support`**. Without it, the server is registered but **never launched**, no matter how correct the plugin is, and `ENABLE_LSP_TOOL=1` alone is not sufficient on current builds. Worse, **Claude Code auto-updates replace the binary and silently revert the patch**, so it must be re-applied after every update. (This gates *every* LSP plugin — gopls, pyright, OmniSharp, roslyn — identically; it is not roslyn-specific.)
+
+The plugin owns this dependency so you don't have to track it by hand:
+
+- **It re-checks every session.** The `SessionStart` hook runs [`boot/lsp-patch.ps1 -Mode check`](boot/lsp-patch.ps1), which is **version-keyed** — so after any CC auto-update it warns again that the patch needs re-applying.
+- **It applies the patch for you, safely.** `boot/lsp-patch.ps1 -Mode apply` installs tweakcc (or uses `npx`) and applies `fix-lsp-support`. Windows locks the *running* `claude.exe`, so the patch can only land when **no Claude process is running** — the script detects running instances and refuses cleanly (no `EBUSY` crash) rather than corrupting the binary. In a multi-agent setup, apply it during an **all-sessions-closed window**:
+
+  ```powershell
+  # with every Claude session closed:
+  pwsh -NoProfile -File boot/lsp-patch.ps1 -Mode apply
+  # then relaunch Claude — the C# LSP starts on first use
+  ```
+
+- **Optional hands-free re-apply across updates.** Run once to register a per-user scheduled task that applies the patch in the next all-closed window after each update (no-op while Claude runs or already patched):
+
+  ```powershell
+  pwsh -NoProfile -File boot/install-lsp-autopatch.ps1
+  ```
+
+Background: [Piebald-AI/claude-code-lsps](https://github.com/Piebald-AI/claude-code-lsps) and [tweakcc](https://github.com/Piebald-AI/tweakcc). Claude Code 2.0.74+ ships the LSP tool; the patch makes it usable.
 
 ## Configuration (env vars)
 

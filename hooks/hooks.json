@@ -8,6 +8,11 @@
             "type": "command",
             "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/boot/ensure-built.ps1\" -Root \"${CLAUDE_PLUGIN_ROOT}\"",
             "async": false
+          },
+          {
+            "type": "command",
+            "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/boot/lsp-patch.ps1\" -Mode check",
+            "async": false
           }
         ]
       }
