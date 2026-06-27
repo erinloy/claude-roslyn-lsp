@@ -1,25 +1,22 @@
 using System.ComponentModel;
 using System.Text;
-using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.FindSymbols;
-using Microsoft.CodeAnalysis.Formatting;
-using Microsoft.CodeAnalysis.Rename;
-using Microsoft.CodeAnalysis.Text;
+using System.Text.Json.Nodes;
+using ClaudeRoslynLsp.Bridge;
 using ModelContextProtocol.Server;
 
 namespace ClaudeRoslynLsp.Mcp;
 
 /// <summary>
 /// Roslyn-powered codebase mutations exposed to the agent as MCP tools — the operations Claude Code's read-only LSP tool
-/// can't do: solution-wide rename, reference discovery, formatting. Each drives the real Roslyn engine (the same one the
-/// IDE "Rename" uses) and writes the resulting edits to disk.
+/// can't do: solution-wide rename, reference discovery, formatting. Each issues an LSP request to the ONE shared Roslyn
+/// daemon (the same warm workspace the LSP uses) and writes the resulting edits to disk — so no per-agent workspace load.
 /// </summary>
 [McpServerToolType]
 public sealed class RefactorTools
 {
-    private readonly WorkspaceHost _host;
+    private readonly DaemonSession _session;
 
-    public RefactorTools(WorkspaceHost host) => _host = host;
+    public RefactorTools(DaemonSession session) => _session = session;
 
     [McpServerTool(Name = "rename_symbol")]
     [Description("Rename the symbol at a file position (0-based line/character) everywhere it is used across the whole " +
@@ -32,16 +29,17 @@ public sealed class RefactorTools
         [Description("The new name (identifier only, no namespace).")] string newName,
         CancellationToken ct)
     {
-        Solution solution = await _host.GetSolutionAsync(ct).ConfigureAwait(false);
-        Document? doc = WorkspaceHost.FindDocument(solution, filePath);
-        if (doc is null) return Err($"file not loaded in the workspace: {filePath}");
+        RoslynDaemonClient client = await _session.GetAsync(ct).ConfigureAwait(false);
+        JsonNode? edit = await client.RequestAsync("textDocument/rename", new JsonObject
+        {
+            ["textDocument"] = new JsonObject { ["uri"] = LspEdits.PathToUri(filePath) },
+            ["position"] = Pos(line, character),
+            ["newName"] = newName,
+        }, ct).ConfigureAwait(false);
 
-        SourceText text = await doc.GetTextAsync(ct).ConfigureAwait(false);
-        int position = WorkspaceHost.PositionOf(text, line, character);
-        ISymbol? symbol = await SymbolFinder.FindSymbolAtPositionAsync(doc, position, ct).ConfigureAwait(false);
-        if (symbol is null) return Err($"no symbol at {filePath}:{line}:{character}");
-
-        return await RenameAsync(solution, symbol, newName, ct).ConfigureAwait(false);
+        IReadOnlyList<string> changed = LspEdits.ApplyWorkspaceEdit(edit);
+        if (changed.Count == 0) return Err($"no rename produced at {filePath}:{line}:{character} (no symbol there, or no change)");
+        return Report($"renamed → '{newName}'", changed);
     }
 
     [McpServerTool(Name = "rename_symbol_by_name")]
@@ -53,10 +51,20 @@ public sealed class RefactorTools
         [Description("The new short name (identifier only).")] string newName,
         CancellationToken ct)
     {
-        Solution solution = await _host.GetSolutionAsync(ct).ConfigureAwait(false);
-        ISymbol? symbol = await ResolveByNameAsync(solution, fullyQualifiedName, ct).ConfigureAwait(false);
-        if (symbol is null) return Err($"could not resolve a type or namespace named '{fullyQualifiedName}'");
-        return await RenameAsync(solution, symbol, newName, ct).ConfigureAwait(false);
+        RoslynDaemonClient client = await _session.GetAsync(ct).ConfigureAwait(false);
+        (string uri, JsonNode position)? loc = await ResolveByNameAsync(client, fullyQualifiedName, ct).ConfigureAwait(false);
+        if (loc is null) return Err($"could not resolve a type or namespace named '{fullyQualifiedName}'");
+
+        JsonNode? edit = await client.RequestAsync("textDocument/rename", new JsonObject
+        {
+            ["textDocument"] = new JsonObject { ["uri"] = loc.Value.uri },
+            ["position"] = loc.Value.position,
+            ["newName"] = newName,
+        }, ct).ConfigureAwait(false);
+
+        IReadOnlyList<string> changed = LspEdits.ApplyWorkspaceEdit(edit);
+        if (changed.Count == 0) return Err($"no rename produced for '{fullyQualifiedName}'");
+        return Report($"renamed '{fullyQualifiedName}' → '{newName}'", changed);
     }
 
     [McpServerTool(Name = "find_references")]
@@ -68,29 +76,25 @@ public sealed class RefactorTools
         [Description("0-based character/column.")] int character,
         CancellationToken ct)
     {
-        Solution solution = await _host.GetSolutionAsync(ct).ConfigureAwait(false);
-        Document? doc = WorkspaceHost.FindDocument(solution, filePath);
-        if (doc is null) return Err($"file not loaded in the workspace: {filePath}");
-
-        SourceText text = await doc.GetTextAsync(ct).ConfigureAwait(false);
-        int position = WorkspaceHost.PositionOf(text, line, character);
-        ISymbol? symbol = await SymbolFinder.FindSymbolAtPositionAsync(doc, position, ct).ConfigureAwait(false);
-        if (symbol is null) return Err($"no symbol at {filePath}:{line}:{character}");
-
-        var refs = await SymbolFinder.FindReferencesAsync(symbol, solution, ct).ConfigureAwait(false);
-        var sb = new StringBuilder();
-        sb.AppendLine($"references to {symbol.ToDisplayString()}:");
-        int count = 0;
-        foreach (ReferencedSymbol r in refs)
+        RoslynDaemonClient client = await _session.GetAsync(ct).ConfigureAwait(false);
+        JsonNode? result = await client.RequestAsync("textDocument/references", new JsonObject
         {
-            foreach (ReferenceLocation loc in r.Locations)
-            {
-                FileLinePositionSpan span = loc.Location.GetLineSpan();
-                sb.AppendLine($"  {span.Path}:{span.StartLinePosition.Line}:{span.StartLinePosition.Character}");
-                count++;
-            }
+            ["textDocument"] = new JsonObject { ["uri"] = LspEdits.PathToUri(filePath) },
+            ["position"] = Pos(line, character),
+            ["context"] = new JsonObject { ["includeDeclaration"] = true },
+        }, ct).ConfigureAwait(false);
+
+        if (result is not JsonArray locations || locations.Count == 0)
+            return $"no references found at {filePath}:{line}:{character}";
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"references ({locations.Count}):");
+        foreach (JsonNode? loc in locations)
+        {
+            string path = LspEdits.UriToPath(loc?["uri"]?.GetValue<string>() ?? "");
+            JsonNode? start = loc?["range"]?["start"];
+            sb.AppendLine($"  {path}:{start?["line"]?.GetValue<int>()}:{start?["character"]?.GetValue<int>()}");
         }
-        sb.AppendLine($"({count} reference(s))");
         return sb.ToString();
     }
 
@@ -101,62 +105,51 @@ public sealed class RefactorTools
         [Description("Absolute path to the .cs/.vb file.")] string filePath,
         CancellationToken ct)
     {
-        Solution solution = await _host.GetSolutionAsync(ct).ConfigureAwait(false);
-        Document? doc = WorkspaceHost.FindDocument(solution, filePath);
-        if (doc is null) return Err($"file not loaded in the workspace: {filePath}");
+        RoslynDaemonClient client = await _session.GetAsync(ct).ConfigureAwait(false);
+        JsonNode? result = await client.RequestAsync("textDocument/formatting", new JsonObject
+        {
+            ["textDocument"] = new JsonObject { ["uri"] = LspEdits.PathToUri(filePath) },
+            ["options"] = new JsonObject { ["tabSize"] = 4, ["insertSpaces"] = true },
+        }, ct).ConfigureAwait(false);
 
-        Document formatted = await Formatter.FormatAsync(doc, cancellationToken: ct).ConfigureAwait(false);
-        SourceText before = await doc.GetTextAsync(ct).ConfigureAwait(false);
-        SourceText after = await formatted.GetTextAsync(ct).ConfigureAwait(false);
-        if (before.ContentEquals(after)) return $"no formatting changes: {filePath}";
-
-        File.WriteAllText(doc.FilePath!, after.ToString());
-        return $"formatted (written): {filePath}";
+        if (result is not JsonArray edits || edits.Count == 0) return $"no formatting changes: {filePath}";
+        bool changed = LspEdits.ApplyTextEdits(filePath, edits);
+        return changed ? $"formatted (written): {filePath}" : $"no formatting changes: {filePath}";
     }
 
-    private async Task<string> RenameAsync(Solution solution, ISymbol symbol, string newName, CancellationToken ct)
+    /// <summary>Resolve a fully-qualified type/namespace name to a declaration location via workspace/symbol.</summary>
+    private static async Task<(string uri, JsonNode position)?> ResolveByNameAsync(
+        RoslynDaemonClient client, string fqn, CancellationToken ct)
     {
-        var options = new SymbolRenameOptions(
-            RenameOverloads: true, RenameInStrings: false, RenameInComments: false, RenameFile: false);
-        Solution updated = await Renamer.RenameSymbolAsync(solution, symbol, options, newName, ct).ConfigureAwait(false);
+        string shortName = fqn.Contains('.') ? fqn[(fqn.LastIndexOf('.') + 1)..] : fqn;
+        JsonNode? syms = await client.RequestAsync("workspace/symbol", new JsonObject { ["query"] = shortName }, ct).ConfigureAwait(false);
+        if (syms is not JsonArray arr) return null;
 
-        IReadOnlyList<string> changed = WorkspaceHost.WriteChangedDocuments(solution, updated, ct);
-        await _host.ReloadAsync(ct).ConfigureAwait(false); // disk changed — refresh the warm workspace
+        JsonNode? best = null;
+        foreach (JsonNode? s in arr)
+        {
+            if (!string.Equals(s?["name"]?.GetValue<string>(), shortName, StringComparison.Ordinal)) continue;
+            // Prefer an exact FQN match on containerName + name; else keep the first name match as a fallback.
+            string container = s?["containerName"]?.GetValue<string>() ?? "";
+            string candidateFqn = string.IsNullOrEmpty(container) ? shortName : $"{container}.{shortName}";
+            if (string.Equals(candidateFqn, fqn, StringComparison.Ordinal)) { best = s; break; }
+            best ??= s;
+        }
+        if (best?["location"] is not JsonObject location) return null;
+        string? uri = location["uri"]?.GetValue<string>();
+        JsonNode? start = location["range"]?["start"];
+        if (uri is null || start is null) return null;
+        return (uri, start.DeepClone());
+    }
 
+    private static JsonObject Pos(int line, int character) => new() { ["line"] = line, ["character"] = character };
+
+    private static string Report(string action, IReadOnlyList<string> changed)
+    {
         var sb = new StringBuilder();
-        sb.AppendLine($"renamed {symbol.Kind} '{symbol.Name}' → '{newName}' across {changed.Count} file(s):");
-        foreach (var f in changed) sb.AppendLine($"  {f}");
+        sb.AppendLine($"{action} across {changed.Count} file(s):");
+        foreach (string f in changed) sb.AppendLine($"  {f}");
         return sb.ToString();
-    }
-
-    /// <summary>Resolve a fully-qualified name to a type (via metadata name) or, failing that, a namespace symbol.</summary>
-    private static async Task<ISymbol?> ResolveByNameAsync(Solution solution, string fqn, CancellationToken ct)
-    {
-        foreach (Project project in solution.Projects)
-        {
-            Compilation? comp = await project.GetCompilationAsync(ct).ConfigureAwait(false);
-            if (comp is null) continue;
-
-            INamedTypeSymbol? type = comp.GetTypeByMetadataName(fqn);
-            if (type is not null) return type;
-
-            INamespaceSymbol? ns = ResolveNamespace(comp.GlobalNamespace, fqn);
-            if (ns is not null) return ns;
-        }
-        return null;
-    }
-
-    private static INamespaceSymbol? ResolveNamespace(INamespaceSymbol root, string dotted)
-    {
-        INamespaceSymbol current = root;
-        foreach (string part in dotted.Split('.', StringSplitOptions.RemoveEmptyEntries))
-        {
-            INamespaceSymbol? next = current.GetNamespaceMembers()
-                .FirstOrDefault(n => string.Equals(n.Name, part, StringComparison.Ordinal));
-            if (next is null) return null;
-            current = next;
-        }
-        return ReferenceEquals(current, root) ? null : current;
     }
 
     private static string Err(string message) => $"ERROR: {message}";

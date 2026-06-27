@@ -264,7 +264,12 @@ internal sealed class LspMultiplexer
                 ["workspaceFolders"] = new JsonArray(new JsonObject { ["uri"] = rootUri, ["name"] = "workspace" }),
                 ["capabilities"] = new JsonObject
                 {
-                    ["workspace"] = new JsonObject { ["configuration"] = true, ["workspaceFolders"] = true },
+                    ["workspace"] = new JsonObject
+                    {
+                        ["configuration"] = true,
+                        ["workspaceFolders"] = true,
+                        ["symbol"] = new JsonObject(),       // workspace/symbol — resolve a type/namespace by name
+                    },
                     ["textDocument"] = new JsonObject
                     {
                         ["synchronization"] = new JsonObject { ["didSave"] = true },
@@ -272,6 +277,8 @@ internal sealed class LspMultiplexer
                         ["hover"] = new JsonObject(),
                         ["definition"] = new JsonObject(),
                         ["references"] = new JsonObject(),
+                        ["rename"] = new JsonObject(),       // textDocument/rename — solution-wide rename
+                        ["formatting"] = new JsonObject(),   // textDocument/formatting — whole-document format
                     },
                 },
             },
