@@ -14,8 +14,11 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- IServiceCollection so an MCP extension can register the services its tool classes inject (e.g. its system client). -->
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="9.0.0" />
+    <!-- IServiceCollection so an MCP extension can register the services its tool classes inject (e.g. its system client).
+         Pinned to 10.0.0 (its net8.0 asset loads fine on the net8.0 daemon) so the hosts SHIP 10.0.0: extensions built in
+         a net10 consumer repo (e.g. ___'s CPM pins DI.Abstractions 10.0.0) bind against the host's copy. If the contract
+         shipped 9.0.0, the net8 daemon couldn't load a net10-built extension's IServiceCollection (real bug, 2026-06-27). -->
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0" />
   </ItemGroup>
 
 </Project>
