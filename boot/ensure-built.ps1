@@ -24,7 +24,8 @@ function L([string]$m) { "$([DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss.fff'))
 $projects = @(
     @{ name = 'daemon'; csproj = 'daemon\ClaudeRoslynLsp.Daemon.csproj'; dll = 'daemon\bin\Release\net8.0\ClaudeRoslynLsp.Daemon.dll' },
     @{ name = 'mcp';    csproj = 'mcp\ClaudeRoslynLsp.Mcp.csproj';       dll = 'mcp\bin\Release\net10.0\ClaudeRoslynLsp.Mcp.dll' },
-    @{ name = 'client'; csproj = 'client\ClaudeRoslynLsp.Client.csproj'; dll = 'client\bin\Release\net8.0\ClaudeRoslynLsp.Client.dll' }
+    @{ name = 'client'; csproj = 'client\ClaudeRoslynLsp.Client.csproj'; dll = 'client\bin\Release\net8.0\ClaudeRoslynLsp.Client.dll' },
+    @{ name = 'cli';    csproj = 'cli\ClaudeRoslynLsp.Cli.csproj';       dll = 'cli\bin\Release\net8.0\crlsp.dll' }
 )
 
 $bridgeDir = Join-Path $Root 'bridge'
