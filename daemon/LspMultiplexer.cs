@@ -69,6 +69,10 @@ internal sealed class LspMultiplexer
         _clients[id] = session;
         _log($"client {id} connected ({_clients.Count} active)");
         ClientCountChanged?.Invoke();
+        // Announce our PID so the client can watch us die — the symmetric peer-death signal shared memory lacks. Without
+        // this, a daemon restart leaves the client blocked forever on the dead ring (orphaning in-flight requests).
+        try { channel.WriteFrame(Encoding.UTF8.GetBytes($"{{\"{PipeKey.DaemonPidKey}\":{Environment.ProcessId}}}")); }
+        catch (Exception ex) { _log($"daemon-pid hello failed for client {id}: {ex.Message}"); }
         session.Start(_ct);
     }
 

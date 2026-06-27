@@ -15,6 +15,7 @@
 using System.Runtime.CompilerServices;
 using System.Text;
 using ClaudeRoslynLsp.Bridge;   // PipeKey, DaemonConnector, LspMessageReader/Writer (linked) — single source of truth
+using ClaudeRoslynLsp.Client;   // DaemonRouter — per-file routing across repos + daemon-death watch
 using Sluice;                   // IFrameChannel — the client↔daemon transport
 
 static string ScriptPath([CallerFilePath] string p = "") => p;
@@ -66,36 +67,31 @@ var stdout = Console.OpenStandardOutput();
 var reader = new LspMessageReader(stdin);
 var writer = new LspMessageWriter(stdout);
 
-// down: daemon frames → Claude stdout. ShmFrameChannel reads are blocking/synchronous, so this owns a dedicated thread.
-// It is the SOLE consumer of the inbound ring and the SOLE writer of stdout.
-var down = new Thread(() =>
+// The router owns the down-pump(s) and routes each up-message to the daemon that owns its file. With a single repo it is
+// exactly the old behaviour (everything → the primary daemon) PLUS the daemon-death watch; with files outside the home
+// root it spins up a per-repo secondary daemon so cross-repo work gets full project-aware analysis. Set
+// CLAUDE_ROSLYN_MULTI_REPO=0 to keep everything on the primary (kill-switch) while still detecting daemon death.
+bool multiRepo = Environment.GetEnvironmentVariable("CLAUDE_ROSLYN_MULTI_REPO") != "0";
+// On home-daemon death we must terminate even though the up-loop is parked on a blocking stdin read (which doesn't observe
+// the token). A hard exit makes Claude Code's LSP host see the server die and restart it — the clean recovery from a
+// daemon restart. Without this the client would block forever on the dead ring, hanging Claude's in-flight LSP call.
+void OnPrimaryDeath()
 {
-    try
-    {
-        while (!cts.IsCancellationRequested && channel.WaitForFrame(cts.Token))
-        {
-            while (channel.TryReadFrame(out var span))
-            {
-                byte[] frame = span.ToArray();   // copy out before AdvanceFrame frees the slot
-                channel.AdvanceFrame();
-                writer.WriteRawAsync(frame, cts.Token).GetAwaiter().GetResult(); // re-frame with Content-Length
-            }
-        }
-    }
-    catch { /* channel closed / cancelled */ }
-    finally { cts.Cancel(); }
-}) { IsBackground = true, Name = "crlsp-down" };
-down.Start();
+    Log("primary daemon died — exiting so Claude Code restarts the LSP and reconnects to the live daemon");
+    try { cts.Cancel(); } catch { }
+    Environment.Exit(17);
+}
+using var router = new DaemonRouter(channel, root, pluginRoot, writer, Log, cts.Token, OnPrimaryDeath, multiRepo);
+Log($"multi-repo routing: {(multiRepo ? "on" : "off (kill-switch)")}");
 
-// up: Claude stdin → daemon frames. The SOLE producer of the outbound ring. On stdin EOF (Claude closed the server)
-// we break and exit the process — the daemon's PID-watch then reaps our session.
+// up: Claude stdin → router. On stdin EOF (Claude closed the server) we break and exit; the daemon's PID-watch reaps us.
 try
 {
     while (!cts.IsCancellationRequested)
     {
         LspMessage? msg = await reader.ReadAsync(cts.Token).ConfigureAwait(false);
         if (msg is null) break; // Claude closed stdin
-        channel.WriteFrame(msg.Raw, cts.Token);
+        router.Up(msg);
     }
 }
 catch { /* stdin closed / cancelled */ }

@@ -29,6 +29,8 @@
     <Compile Include="../bridge/PipeKey.cs" Link="PipeKey.cs" />
     <Compile Include="../bridge/JsonRpc.cs" Link="JsonRpc.cs" />
     <Compile Include="../bridge/DaemonConnector.cs" Link="DaemonConnector.cs" />
+    <!-- DaemonRouter resolves a file's workspace root from its uri (cross-repo routing). -->
+    <Compile Include="../bridge/LspEdits.cs" Link="LspEdits.cs" />
   </ItemGroup>
 
 </Project>

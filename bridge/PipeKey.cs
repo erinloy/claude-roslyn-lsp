@@ -32,4 +32,11 @@ public static class PipeKey
     /// <summary>JSON key of the hello frame the client sends first (announcing its PID) so the daemon can reap the
     /// session when that process exits — shared memory has no peer-death (pipe-EOF) signal.</summary>
     public const string PidHelloKey = "$claudeRoslynClientPid";
+
+    /// <summary>JSON key of the hello frame the daemon sends back on accept (announcing ITS PID) so the client can detect
+    /// the daemon dying — the symmetric peer-death watch. Without it a daemon restart orphans the client's in-flight
+    /// requests and the client blocks forever on the dead ring (shared memory has no pipe-EOF). The client intercepts this
+    /// frame (never forwards it to Claude), PID-watches the daemon, and exits cleanly on its death so Claude Code restarts
+    /// the LSP server and it reconnects to the live daemon.</summary>
+    public const string DaemonPidKey = "$claudeRoslynDaemonPid";
 }
