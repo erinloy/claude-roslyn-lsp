@@ -119,7 +119,10 @@ public sealed class CrlspCommands
         void OnNote(JsonNode n)
         {
             if (n["method"]?.GetValue<string>() != "textDocument/publishDiagnostics") return;
-            if (!string.Equals(n["params"]?["uri"]?.GetValue<string>(), uri, StringComparison.OrdinalIgnoreCase)) return;
+            string pushUri = n["params"]?["uri"]?.GetValue<string>() ?? "";
+            bool isOwn = string.Equals(pushUri, uri, StringComparison.OrdinalIgnoreCase);
+            // Print EVERY publishDiagnostics, labeled by file — so this probe shows per-client routing: a file we DID open
+            // arrives full; a file another client opened arrives here errors-only (general visibility, no hint flood).
             var lines = new List<string>();
             foreach (JsonNode? d in n["params"]?["diagnostics"]?.AsArray() ?? new JsonArray())
             {
@@ -127,8 +130,9 @@ public sealed class CrlspCommands
                 lines.Add($"  {SevName(d?["severity"]?.GetValue<int>() ?? 0),-7} :{start?["line"]?.GetValue<int>()}:{start?["character"]?.GetValue<int>()} {d?["code"]}: {d?["message"]?.GetValue<string>()}");
             }
             rounds++;
-            latest = lines;
-            Console.WriteLine($"[push #{rounds}] {(lines.Count == 0 ? "0 diagnostics" : $"{lines.Count} diagnostic(s)")}");
+            if (isOwn) latest = lines;
+            string label = isOwn ? "[own]" : $"[other:{System.IO.Path.GetFileName(new Uri(pushUri).LocalPath)}]";
+            Console.WriteLine($"[push #{rounds}] {label} {(lines.Count == 0 ? "0 diagnostics" : $"{lines.Count} diagnostic(s)")}");
             lines.ForEach(Console.WriteLine);
         }
 

@@ -35,6 +35,7 @@ internal sealed class LspMultiplexer
     private readonly ConcurrentDictionary<string, int> _openDocs = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, int> _docVersions = new(StringComparer.Ordinal);          // monotonic didChange version per open doc
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _diagDebounce = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, int> _lastErrorSig = new(StringComparer.Ordinal);            // last errors-only signature published to non-openers, per uri
     private long _nextGlobalId = 1; // 0 reserved for the daemon's own initialize
     private int _nextClientId = 0;
 
@@ -79,6 +80,10 @@ internal sealed class LspMultiplexer
             // Drop any pending requests owned by this session so the maps don't leak.
             foreach (var kv in _pending)
                 if (ReferenceEquals(kv.Value.session, session)) _pending.TryRemove(kv.Key, out _);
+            // Release the docs this session held open. A client can vanish without sending didClose (PID-watch close),
+            // which would otherwise leave the doc open in Roslyn forever; synthesize a didClose per uri to decrement the
+            // shared ref-count (and tell the server to close it when this was the last opener).
+            foreach (string uri in session.TakeOpenUris()) _ = ReleaseOpenDocAsync(uri);
             ClientCountChanged?.Invoke();
         }
     }
@@ -193,6 +198,10 @@ internal sealed class LspMultiplexer
 
             case "textDocument/didOpen":
             case "textDocument/didClose":
+                if (DocUri(json) is { } su)
+                {
+                    if (method == "textDocument/didOpen") session.OpenUri(su); else session.CloseUri(su);
+                }
                 await HandleDocSyncAsync(method, json).ConfigureAwait(false);
                 // A freshly-opened doc gets an immediate pull (often empty until the server computes) — the real set
                 // arrives via the server's diagnostic/refresh. No disk resync: didOpen already carried the content.
@@ -221,6 +230,22 @@ internal sealed class LspMultiplexer
         }
     }
 
+    /// <summary>Synthesize a didClose for a disconnected client's open doc, releasing it from the shared ref-count.</summary>
+    private async Task ReleaseOpenDocAsync(string uri)
+    {
+        try
+        {
+            var close = new JsonObject
+            {
+                ["jsonrpc"] = "2.0",
+                ["method"] = "textDocument/didClose",
+                ["params"] = new JsonObject { ["textDocument"] = new JsonObject { ["uri"] = uri } },
+            };
+            await HandleDocSyncAsync("textDocument/didClose", close).ConfigureAwait(false);
+        }
+        catch (Exception ex) { _log($"release open doc {uri} failed: {ex.Message}"); }
+    }
+
     /// <summary>Ref-count opens so one shared LS sees a doc opened once and closed when the last client drops it.</summary>
     private async Task HandleDocSyncAsync(string method, JsonNode json)
     {
@@ -243,6 +268,7 @@ internal sealed class LspMultiplexer
                 // (a didChange/diagnostic for a closed document is a protocol violation the server may abort on).
                 if (_diagDebounce.TryRemove(uri, out var cts)) { try { cts.Cancel(); cts.Dispose(); } catch { } }
                 _docVersions.TryRemove(uri, out _);
+                _lastErrorSig.TryRemove(uri, out _);
                 await _lsWriter.WriteJsonAsync(json.DeepClone()!, _ct).ConfigureAwait(false);
             }
             else _openDocs[uri] = after;
@@ -318,12 +344,61 @@ internal sealed class LspMultiplexer
         // 3. A "full" report carries the current item set (empty = clear); "unchanged"/no-report → leave clients as-is.
         if (kind != "full") { _log($"diag[{(resyncFromDisk ? "edit" : "open/refresh")}] {uri} → no report (kind={kind}) — skip"); return; }
         JsonArray items = (result!["items"] as JsonArray)?.DeepClone()?.AsArray() ?? new JsonArray();
-        _log($"diag[{(resyncFromDisk ? "edit" : "open/refresh")}] {uri} → {items.Count} item(s)");
-        await BroadcastJsonAsync(Notify("textDocument/publishDiagnostics", new JsonObject
+        await PublishRoutedAsync(uri, items, resyncFromDisk).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Route a document's diagnostics per-client so each Claude instance sees what it cares about and isn't flooded:
+    ///  - a client that has the document OPEN gets the FULL set (errors + warnings + hints) — complete visibility;
+    ///  - every OTHER client gets ERRORS ONLY, and only when that error set CHANGES — general visibility into a break in
+    ///    a surrounding area (interdependencies matter) without the info/hint spam from a file it isn't working on.
+    /// </summary>
+    private async Task PublishRoutedAsync(string uri, JsonArray items, bool fromEdit)
+    {
+        // Full set → clients that have THIS uri open.
+        byte[]? fullRaw = null; int openers = 0;
+        foreach (var c in _clients.Values)
         {
-            ["uri"] = uri,
-            ["diagnostics"] = items,
-        })).ConfigureAwait(false);
+            if (!c.HasOpen(uri)) continue;
+            fullRaw ??= Encoding.UTF8.GetBytes(Notify("textDocument/publishDiagnostics",
+                new JsonObject { ["uri"] = uri, ["diagnostics"] = items.DeepClone() }).ToJsonString());
+            try { await c.SendRawAsync(fullRaw).ConfigureAwait(false); } catch { }
+            openers++;
+        }
+
+        // Errors-only projection → non-openers, but only when it changed since last time (no per-refresh re-spam).
+        var errors = new JsonArray();
+        foreach (JsonNode? d in items)
+            if (d?["severity"]?.GetValue<int>() == 1) errors.Add(d.DeepClone());
+        int sig = ErrorSignature(errors);
+        bool changed = !_lastErrorSig.TryGetValue(uri, out int prev) || prev != sig;
+        _log($"diag[{(fromEdit ? "edit" : "open/refresh")}] {uri} → {items.Count} item(s) ({openers} opener(s), {errors.Count} error(s){(changed ? ", errors-changed" : "")})");
+        if (!changed) return;          // surrounding-area error set is the same — don't re-broadcast to non-openers
+        _lastErrorSig[uri] = sig;
+        if (errors.Count == 0 && prev == 0) return; // never had errors and still none → nothing to clear
+
+        byte[]? errRaw = null;
+        foreach (var c in _clients.Values)
+        {
+            if (c.HasOpen(uri)) continue; // openers already got the full set
+            errRaw ??= Encoding.UTF8.GetBytes(Notify("textDocument/publishDiagnostics",
+                new JsonObject { ["uri"] = uri, ["diagnostics"] = errors.DeepClone() }).ToJsonString());
+            try { await c.SendRawAsync(errRaw).ConfigureAwait(false); } catch { }
+        }
+    }
+
+    /// <summary>Order-independent signature of an error set (line+code+message), so we re-broadcast only on real change.</summary>
+    private static int ErrorSignature(JsonArray errors)
+    {
+        int acc = 17;
+        foreach (JsonNode? d in errors)
+        {
+            int line = d?["range"]?["start"]?["line"]?.GetValue<int>() ?? -1;
+            string code = d?["code"]?.ToString() ?? "";
+            string msg = d?["message"]?.GetValue<string>() ?? "";
+            acc += HashCode.Combine(line, code, msg); // += keeps it order-independent
+        }
+        return acc;
     }
 
     /// <summary>One textDocument/diagnostic round-trip; returns the raw report result (null on error/timeout).</summary>
@@ -446,9 +521,25 @@ internal sealed class ClientSession
     private readonly Action<string> _log;
     private readonly CancellationTokenSource _closed = new();
     private readonly BlockingCollection<byte[]> _outbound = new(boundedCapacity: 8192);
+    private readonly ConcurrentDictionary<string, byte> _openUris = new(StringComparer.Ordinal); // docs THIS client has open
     private int _pidWatched;
 
     public int Id { get; }
+
+    // Per-client open-document tracking drives diagnostic routing: a client gets a document's FULL diagnostics only when
+    // it has that document open; otherwise it sees errors-only. Tracked here (not just the mux's shared ref-count) so the
+    // routing is per-instance, and so a client that dies without didClose still has its opens released (see TakeOpenUris).
+    public void OpenUri(string uri) => _openUris[uri] = 1;
+    public void CloseUri(string uri) => _openUris.TryRemove(uri, out _);
+    public bool HasOpen(string uri) => _openUris.ContainsKey(uri);
+
+    /// <summary>Atomically drain and return the set of open URIs — used on disconnect to release each from the shared ref-count.</summary>
+    public IReadOnlyCollection<string> TakeOpenUris()
+    {
+        var keys = _openUris.Keys.ToArray();
+        _openUris.Clear();
+        return keys;
+    }
 
     public ClientSession(int id, IFrameChannel channel, LspMultiplexer mux, Action<string> log)
     {

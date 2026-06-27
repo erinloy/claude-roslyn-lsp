@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "roslyn-refactor": {
-      "command": "dotnet",
-      "args": ["exec", "${CLAUDE_PLUGIN_ROOT}/mcp/bin/Release/net10.0/ClaudeRoslynLsp.Mcp.dll"],
+      "command": "pwsh",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${CLAUDE_PLUGIN_ROOT}/boot/run.ps1", "mcp"],
       "env": {}
     }
   }

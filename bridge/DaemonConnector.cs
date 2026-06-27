@@ -67,17 +67,20 @@ public static class DaemonConnector
             EnsureBuilt(Path.Combine(pluginRoot, "daemon", "ClaudeRoslynLsp.Daemon.csproj"), daemonDll, "daemon", log);
         if (!File.Exists(daemonDll)) { log($"daemon dll missing after build attempt: {daemonDll}"); return; }
 
-        // `dotnet exec` runs the built assembly with no build step. UseShellExecute detaches the daemon fully so it
-        // OUTLIVES the caller and gets NO inherited console — its stdout can't leak onto any LSP wire.
-        var psi = new ProcessStartInfo("dotnet")
+        // Launch through boot/run.ps1, which shadow-copies the build output and execs from the copy — so the daemon NEVER
+        // locks daemon/bin (rebuilds stay possible at any number of concurrent instances). `--detached` makes run.ps1
+        // Start-Process the daemon hidden+detached (it outlives this caller, gets no inherited console) and return at once.
+        string runPs1 = Path.Combine(pluginRoot, "boot", "run.ps1");
+        var psi = new ProcessStartInfo("pwsh")
         {
             UseShellExecute = true,
             CreateNoWindow = true,
             WindowStyle = ProcessWindowStyle.Hidden,
             WorkingDirectory = root,
         };
-        psi.ArgumentList.Add("exec");
-        psi.ArgumentList.Add(daemonDll);
+        psi.ArgumentList.Add("-NoProfile"); psi.ArgumentList.Add("-ExecutionPolicy"); psi.ArgumentList.Add("Bypass");
+        psi.ArgumentList.Add("-File"); psi.ArgumentList.Add(runPs1);
+        psi.ArgumentList.Add("daemon"); psi.ArgumentList.Add("--detached");
         psi.ArgumentList.Add("--root"); psi.ArgumentList.Add(root);
         if (!string.IsNullOrWhiteSpace(solution)) { psi.ArgumentList.Add("--solution"); psi.ArgumentList.Add(solution!); }
         try { Process.Start(psi); }

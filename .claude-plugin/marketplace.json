@@ -22,8 +22,8 @@
       "license": "MIT",
       "lspServers": {
         "csharp": {
-          "command": "dotnet",
-          "args": ["exec", "${CLAUDE_PLUGIN_ROOT}/client/bin/Release/net8.0/ClaudeRoslynLsp.Client.dll"],
+          "command": "pwsh",
+          "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${CLAUDE_PLUGIN_ROOT}/boot/run.ps1", "client"],
           "transport": "stdio",
           "extensionToLanguage": {
             ".cs": "csharp",

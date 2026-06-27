@@ -91,7 +91,9 @@ function PreWarm-Daemon {
     if ($alive) { L "prewarm: daemon already alive for $ws ($endpoint)"; return }
 
     L "prewarm: starting daemon for $ws ($endpoint)"
-    try { Start-Process -FilePath 'dotnet' -ArgumentList @('exec', $daemonDll, '--root', $ws) -WindowStyle Hidden | Out-Null }
+    # Launch through run.ps1 so the daemon runs from a shadow copy and never locks daemon/bin (rebuild-safe at any N).
+    $runPs1 = Join-Path $Root 'boot\run.ps1'
+    try { Start-Process -FilePath 'pwsh' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runPs1, 'daemon', '--detached', '--root', $ws) -WindowStyle Hidden | Out-Null }
     catch { L "prewarm: failed to start daemon: $($_.Exception.Message)" }
 }
 PreWarm-Daemon
