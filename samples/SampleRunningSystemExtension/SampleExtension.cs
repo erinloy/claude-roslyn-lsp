@@ -22,11 +22,16 @@ namespace SampleRunningSystemExtension;
 /// } ] }
 /// </code>
 /// </summary>
-public sealed class SampleExtension : ICrlspExtension, IMcpToolExtension, IDiagnosticExtension
+public sealed class SampleExtension : ICrlspExtension, IMcpToolExtension, IDiagnosticExtension, IHoverExtension
 {
     public string Name => "sample-running-system";
 
     private readonly SampleSystemClient _client = new();
+
+    // IHoverExtension: append running-system context to the hover Roslyn produces. The sample appends the system's
+    // one-line status; a real extension would report the hovered symbol's live value/state from the running system.
+    public Task<string?> GetHoverAsync(string fileUri, string filePath, int line, int character, CancellationToken ct)
+        => Task.FromResult<string?>($"**running system** — {_client.OneLineStatus()}");
 
     // IDiagnosticExtension: merge a live-system signal into a file's diagnostics. The sample surfaces the running system's
     // status as an info diagnostic at the top of every C# file; a real extension would, e.g., flag that the actuator a

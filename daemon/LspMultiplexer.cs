@@ -40,15 +40,17 @@ internal sealed class LspMultiplexer
     private int _nextClientId = 0;
 
     private readonly IReadOnlyList<IDiagnosticExtension> _diagExtensions;
+    private readonly IReadOnlyList<IHoverExtension> _hoverExtensions;
 
     public LspMultiplexer(Stream lsIn, Stream lsOut, Action<string> log, CancellationToken ct,
-        IReadOnlyList<IDiagnosticExtension>? diagExtensions = null)
+        IReadOnlyList<IDiagnosticExtension>? diagExtensions = null, IReadOnlyList<IHoverExtension>? hoverExtensions = null)
     {
         _lsWriter = new LspMessageWriter(lsIn);
         _lsReader = new LspMessageReader(lsOut);
         _log = log;
         _ct = ct;
         _diagExtensions = diagExtensions ?? Array.Empty<IDiagnosticExtension>();
+        _hoverExtensions = hoverExtensions ?? Array.Empty<IHoverExtension>();
     }
 
     public int ClientCount => _clients.Count;
@@ -177,6 +179,14 @@ internal sealed class LspMultiplexer
         if (json is null) return;
         string? method = json["method"]?.GetValue<string>();
         JsonNode? idNode = json["id"];
+
+        // Hover augmentation: only when an extension contributes hover. Otherwise hover takes the unchanged generic
+        // forward path below (zero behaviour change for the common case / a daemon with no hover extensions).
+        if (_hoverExtensions.Count > 0 && method == "textDocument/hover" && idNode is not null)
+        {
+            _ = HandleHoverAsync(session, idNode.DeepClone(), json.DeepClone()!.AsObject());
+            return;
+        }
 
         switch (method)
         {
@@ -354,6 +364,68 @@ internal sealed class LspMultiplexer
         JsonArray items = (result!["items"] as JsonArray)?.DeepClone()?.AsArray() ?? new JsonArray();
         await AugmentWithExtensionsAsync(uri, items, ct).ConfigureAwait(false);
         await PublishRoutedAsync(uri, items, resyncFromDisk).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Serve a hover request with extension augmentation: forward it to Roslyn (internal id), gather each
+    /// IHoverExtension's running-system hover, then reply to the client with the two merged. Resilient + time-bounded so a
+    /// slow/down running system degrades to Roslyn-only hover rather than hanging the request.
+    /// </summary>
+    private async Task HandleHoverAsync(ClientSession session, JsonNode originalId, JsonObject request)
+    {
+        JsonNode? roslyn = null;
+        try
+        {
+            long pid = Interlocked.Increment(ref _nextGlobalId);
+            var tcs = new TaskCompletionSource<JsonNode?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _internalPending[pid] = tcs;
+            JsonObject fwd = request.DeepClone()!.AsObject();
+            fwd["id"] = pid;
+            await _lsWriter.WriteJsonAsync(fwd, _ct).ConfigureAwait(false);
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(_ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(10));
+            try { roslyn = await tcs.Task.WaitAsync(cts.Token).ConfigureAwait(false); }
+            finally { _internalPending.TryRemove(pid, out _); }
+        }
+        catch (Exception ex) { _log($"hover forward failed: {ex.Message}"); }
+
+        string uri = request["params"]?["textDocument"]?["uri"]?.GetValue<string>() ?? "";
+        int line = request["params"]?["position"]?["line"]?.GetValue<int>() ?? 0;
+        int character = request["params"]?["position"]?["character"]?.GetValue<int>() ?? 0;
+        string path; try { path = LspEdits.UriToPath(uri); } catch { path = uri; }
+
+        var extras = new List<string>();
+        foreach (IHoverExtension ext in _hoverExtensions)
+        {
+            try
+            {
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(_ct);
+                cts.CancelAfter(TimeSpan.FromSeconds(5));
+                string? h = await ext.GetHoverAsync(uri, path, line, character, cts.Token).ConfigureAwait(false);
+                if (!string.IsNullOrWhiteSpace(h)) extras.Add(h!);
+            }
+            catch (Exception ex) { _log($"hover extension {ext.GetType().Name} failed: {ex.Message}"); }
+        }
+
+        await session.SendAsync(new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = originalId,
+            ["result"] = MergeHover(roslyn, extras),
+        }).ConfigureAwait(false);
+    }
+
+    /// <summary>Combine Roslyn's hover with extension hover parts into one markdown Hover (null if neither has anything).</summary>
+    private static JsonNode? MergeHover(JsonNode? roslyn, List<string> extras)
+    {
+        if (extras.Count == 0) return roslyn?.DeepClone();
+        string baseValue = roslyn?["contents"]?["value"]?.GetValue<string>()
+            ?? (roslyn?["contents"] as JsonValue)?.GetValue<string>() ?? "";
+        string combined = baseValue;
+        foreach (string e in extras) combined += (combined.Length > 0 ? "\n\n---\n\n" : "") + e;
+        var hover = new JsonObject { ["contents"] = new JsonObject { ["kind"] = "markdown", ["value"] = combined } };
+        if (roslyn?["range"] is { } range) hover["range"] = range.DeepClone();
+        return hover;
     }
 
     /// <summary>

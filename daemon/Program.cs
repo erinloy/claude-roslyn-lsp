@@ -53,14 +53,16 @@ static async Task RunDaemon(
         // daemon uses the IDiagnosticExtension surface to merge live-system state into each file's published diagnostics.
         var loadedExtensions = ExtensionLoader.Load(root, "daemon", Log);
         var diagExtensions = new List<IDiagnosticExtension>();
+        var hoverExtensions = new List<IHoverExtension>();
         foreach (var le in loadedExtensions)
         {
             try { await le.Extension.InitializeAsync(new ExtensionContext { WorkspaceRoot = root, Host = "daemon", Log = Log, Config = le.Config }, cts.Token).ConfigureAwait(false); }
             catch (Exception ex) { Log($"extension '{le.Name}' init failed: {ex.Message}"); }
             if (le.Extension is IDiagnosticExtension d) diagExtensions.Add(d);
+            if (le.Extension is IHoverExtension h) hoverExtensions.Add(h);
         }
 
-        var mux = new LspMultiplexer(server.StandardInput.BaseStream, server.StandardOutput.BaseStream, Log, cts.Token, diagExtensions);
+        var mux = new LspMultiplexer(server.StandardInput.BaseStream, server.StandardOutput.BaseStream, Log, cts.Token, diagExtensions, hoverExtensions);
         await mux.StartAsync(root, solutionOverride).ConfigureAwait(false);
 
         var idle = new IdleShutdown(mux, TimeSpan.FromSeconds(idleSeconds), Log, cts);
