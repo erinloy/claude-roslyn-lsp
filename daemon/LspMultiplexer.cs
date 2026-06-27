@@ -41,9 +41,11 @@ internal sealed class LspMultiplexer
 
     private readonly IReadOnlyList<IDiagnosticExtension> _diagExtensions;
     private readonly IReadOnlyList<IHoverExtension> _hoverExtensions;
+    private readonly IReadOnlyList<ISymbolExtension> _symbolExtensions;
 
     public LspMultiplexer(Stream lsIn, Stream lsOut, Action<string> log, CancellationToken ct,
-        IReadOnlyList<IDiagnosticExtension>? diagExtensions = null, IReadOnlyList<IHoverExtension>? hoverExtensions = null)
+        IReadOnlyList<IDiagnosticExtension>? diagExtensions = null, IReadOnlyList<IHoverExtension>? hoverExtensions = null,
+        IReadOnlyList<ISymbolExtension>? symbolExtensions = null)
     {
         _lsWriter = new LspMessageWriter(lsIn);
         _lsReader = new LspMessageReader(lsOut);
@@ -51,6 +53,15 @@ internal sealed class LspMultiplexer
         _ct = ct;
         _diagExtensions = diagExtensions ?? Array.Empty<IDiagnosticExtension>();
         _hoverExtensions = hoverExtensions ?? Array.Empty<IHoverExtension>();
+        _symbolExtensions = symbolExtensions ?? Array.Empty<ISymbolExtension>();
+    }
+
+    /// <summary>STREAMS push primitive handed to extensions: re-pull + re-publish a document's diagnostics (now carrying
+    /// the extension's updated live state) through per-client routing. <paramref name="uri"/> null ⇒ every open document.</summary>
+    public void RefreshDiagnostics(string? uri)
+    {
+        if (uri is not null) { TriggerDiagnostics(uri, resyncFromDisk: false); return; }
+        foreach (string open in _openDocs.Keys) TriggerDiagnostics(open, resyncFromDisk: false);
     }
 
     public int ClientCount => _clients.Count;
@@ -185,6 +196,14 @@ internal sealed class LspMultiplexer
         if (_hoverExtensions.Count > 0 && method == "textDocument/hover" && idNode is not null)
         {
             _ = HandleHoverAsync(session, idNode.DeepClone(), json.DeepClone()!.AsObject());
+            return;
+        }
+
+        // workspaceSymbol augmentation (SYMBOLS): same guard/shape as hover — merge the running system's catalog into
+        // Roslyn's results when an extension contributes symbols; otherwise the unchanged generic forward path runs.
+        if (_symbolExtensions.Count > 0 && method == "workspace/symbol" && idNode is not null)
+        {
+            _ = HandleWorkspaceSymbolAsync(session, idNode.DeepClone(), json.DeepClone()!.AsObject());
             return;
         }
 
@@ -412,6 +431,66 @@ internal sealed class LspMultiplexer
             ["jsonrpc"] = "2.0",
             ["id"] = originalId,
             ["result"] = MergeHover(roslyn, extras),
+        }).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Serve a workspace/symbol request with extension augmentation: forward to Roslyn (internal id) and concurrently ask
+    /// each ISymbolExtension for matches from its running system, then reply with the union. Time-bounded + isolated so a
+    /// slow/down running system degrades to Roslyn-only symbols.
+    /// </summary>
+    private async Task HandleWorkspaceSymbolAsync(ClientSession session, JsonNode originalId, JsonObject request)
+    {
+        JsonNode? roslyn = null;
+        try
+        {
+            long pid = Interlocked.Increment(ref _nextGlobalId);
+            var tcs = new TaskCompletionSource<JsonNode?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _internalPending[pid] = tcs;
+            JsonObject fwd = request.DeepClone()!.AsObject();
+            fwd["id"] = pid;
+            await _lsWriter.WriteJsonAsync(fwd, _ct).ConfigureAwait(false);
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(_ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(10));
+            try { roslyn = await tcs.Task.WaitAsync(cts.Token).ConfigureAwait(false); }
+            finally { _internalPending.TryRemove(pid, out _); }
+        }
+        catch (Exception ex) { _log($"workspace/symbol forward failed: {ex.Message}"); }
+
+        string query = request["params"]?["query"]?.GetValue<string>() ?? "";
+        var merged = roslyn?.DeepClone()?.AsArray() ?? new JsonArray();
+        foreach (ISymbolExtension ext in _symbolExtensions)
+        {
+            try
+            {
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(_ct);
+                cts.CancelAfter(TimeSpan.FromSeconds(5));
+                IReadOnlyList<ExtSymbol> hits = await ext.GetWorkspaceSymbolsAsync(query, cts.Token).ConfigureAwait(false);
+                foreach (ExtSymbol s in hits)
+                    merged.Add(new JsonObject
+                    {
+                        ["name"] = s.Name,
+                        ["kind"] = (int)s.Kind,
+                        ["containerName"] = s.Container,
+                        ["location"] = new JsonObject
+                        {
+                            ["uri"] = s.LocationUri,
+                            ["range"] = new JsonObject
+                            {
+                                ["start"] = new JsonObject { ["line"] = s.Line, ["character"] = s.Character },
+                                ["end"] = new JsonObject { ["line"] = s.Line, ["character"] = s.Character },
+                            },
+                        },
+                    });
+            }
+            catch (Exception ex) { _log($"symbol extension {ext.GetType().Name} failed: {ex.Message}"); }
+        }
+
+        await session.SendAsync(new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = originalId,
+            ["result"] = merged,
         }).ConfigureAwait(false);
     }
 

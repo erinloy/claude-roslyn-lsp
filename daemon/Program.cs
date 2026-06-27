@@ -49,21 +49,36 @@ static async Task RunDaemon(
         using var server = RoslynServer.Start(serverDll, logDir, Log);
         Log($"roslyn server pid {server.Id} started");
 
-        // Load repo-declared extensions (.claude-roslyn/extensions.json) and dial them out to their running systems. The
-        // daemon uses the IDiagnosticExtension surface to merge live-system state into each file's published diagnostics.
+        // Load repo-declared extensions (.claude-roslyn/extensions.json) and partition them by capability. The daemon
+        // surfaces the running system they dial out to as: diagnostics merged into a file's set, hover, and workspaceSymbol
+        // reaching into the system's catalog (SYMBOLS). Partition first (no init yet) so the mux can carry the capability
+        // lists, then dial each extension out AFTER the mux exists — its STREAMS refresh callback rides the live mux.
         var loadedExtensions = ExtensionLoader.Load(root, "daemon", Log);
         var diagExtensions = new List<IDiagnosticExtension>();
         var hoverExtensions = new List<IHoverExtension>();
+        var symbolExtensions = new List<ISymbolExtension>();
         foreach (var le in loadedExtensions)
         {
-            try { await le.Extension.InitializeAsync(new ExtensionContext { WorkspaceRoot = root, Host = "daemon", Log = Log, Config = le.Config }, cts.Token).ConfigureAwait(false); }
-            catch (Exception ex) { Log($"extension '{le.Name}' init failed: {ex.Message}"); }
             if (le.Extension is IDiagnosticExtension d) diagExtensions.Add(d);
             if (le.Extension is IHoverExtension h) hoverExtensions.Add(h);
+            if (le.Extension is ISymbolExtension s) symbolExtensions.Add(s);
         }
 
-        var mux = new LspMultiplexer(server.StandardInput.BaseStream, server.StandardOutput.BaseStream, Log, cts.Token, diagExtensions, hoverExtensions);
+        var mux = new LspMultiplexer(server.StandardInput.BaseStream, server.StandardOutput.BaseStream, Log, cts.Token, diagExtensions, hoverExtensions, symbolExtensions);
         await mux.StartAsync(root, solutionOverride).ConfigureAwait(false);
+
+        foreach (var le in loadedExtensions)
+        {
+            try
+            {
+                await le.Extension.InitializeAsync(new ExtensionContext
+                {
+                    WorkspaceRoot = root, Host = "daemon", Log = Log, Config = le.Config,
+                    RequestDiagnosticRefresh = uri => { mux.RefreshDiagnostics(uri); return Task.CompletedTask; },
+                }, cts.Token).ConfigureAwait(false);
+            }
+            catch (Exception ex) { Log($"extension '{le.Name}' init failed: {ex.Message}"); }
+        }
 
         var idle = new IdleShutdown(mux, TimeSpan.FromSeconds(idleSeconds), Log, cts);
         idle.Start();

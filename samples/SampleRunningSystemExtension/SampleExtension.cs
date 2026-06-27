@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Linq;
 using ClaudeRoslynLsp.Extensions;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Server;
@@ -22,11 +23,26 @@ namespace SampleRunningSystemExtension;
 /// } ] }
 /// </code>
 /// </summary>
-public sealed class SampleExtension : ICrlspExtension, IMcpToolExtension, IDiagnosticExtension, IHoverExtension
+public sealed class SampleExtension : ICrlspExtension, IMcpToolExtension, IDiagnosticExtension, IHoverExtension, ISymbolExtension
 {
     public string Name => "sample-running-system";
 
     private readonly SampleSystemClient _client = new();
+
+    // ISymbolExtension: surface the running system's catalog so workspaceSymbol reaches into it. The sample returns two
+    // stand-in "organs"; a real extension returns its live catalog (e.g. Matrix's system/paths organs) filtered by query.
+    public Task<IReadOnlyList<ExtSymbol>> GetWorkspaceSymbolsAsync(string query, CancellationToken ct)
+    {
+        var all = new[]
+        {
+            new ExtSymbol("running-system/status", ExtSymbolKind.Property, "sample", "sample://status"),
+            new ExtSymbol("running-system/uptime", ExtSymbolKind.Field, "sample", "sample://uptime"),
+        };
+        IReadOnlyList<ExtSymbol> hits = string.IsNullOrWhiteSpace(query)
+            ? all
+            : all.Where(s => s.Name.Contains(query, StringComparison.OrdinalIgnoreCase)).ToArray();
+        return Task.FromResult(hits);
+    }
 
     // IHoverExtension: append running-system context to the hover Roslyn produces. The sample appends the system's
     // one-line status; a real extension would report the hovered symbol's live value/state from the running system.
@@ -52,6 +68,23 @@ public sealed class SampleExtension : ICrlspExtension, IMcpToolExtension, IDiagn
         string endpoint = context.Config?["endpoint"]?.GetValue<string>() ?? "self";
         context.Log($"attaching to running system '{endpoint}' (host={context.Host}, root={context.WorkspaceRoot})");
         _client.Attach(endpoint, context.Log);
+        // STREAMS demo: a real extension subscribes to its running system (e.g. Matrix's watch/Fusion push) and calls
+        // RequestDiagnosticRefresh on every change so the new live state re-publishes through per-client routing. The
+        // sample stands in for that change-stream with a periodic tick (the callback is daemon-host only).
+        if (context.RequestDiagnosticRefresh is { } refresh)
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    while (!ct.IsCancellationRequested)
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(4), ct);
+                        await refresh(null); // null ⇒ every open doc re-publishes with the system's now-current status
+                        context.Log("sample stream: pushed a diagnostic refresh");
+                    }
+                }
+                catch (OperationCanceledException) { }
+            }, ct);
         return Task.CompletedTask;
     }
 

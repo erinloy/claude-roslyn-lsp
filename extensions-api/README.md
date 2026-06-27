@@ -38,9 +38,21 @@ Implement `ICrlspExtension` (lifecycle) plus any capability interface for the su
 | Interface | Surface | Loaded by |
 |---|---|---|
 | `ICrlspExtension` | `InitializeAsync` (dial out) / `DisposeAsync` | daemon + MCP |
-| `IMcpToolExtension` | agent-callable MCP tools (`ConfigureServices` + `ToolTypes`) | MCP |
+| `IMcpToolExtension` | agent-callable MCP tools — **QUERIES** (`ConfigureServices` + `ToolTypes`) | MCP |
+| `ISymbolExtension` | the running system's catalog reachable via `workspaceSymbol` — **SYMBOLS** | daemon |
 | `IDiagnosticExtension` | live state merged into a file's diagnostics | daemon |
 | `IHoverExtension` | live state on hover | daemon |
+
+### Subscribable streams
+
+For **STREAMS** — pushing the running system's change-events to the agent — there is no separate interface. In
+`InitializeAsync`, start your own subscription to the running system (e.g. an SSE/WebSocket watch), and on each change call
+`context.RequestDiagnosticRefresh(uri)` (or `(null)` for every open document). The daemon re-pulls and re-publishes those
+documents' diagnostics — now carrying your updated `IDiagnosticExtension` state — through its existing per-client routing, so
+each agent sees the change on exactly the files it has open. The callback is daemon-host only (`null` under MCP) — null-check it.
+
+The three live capabilities compose: a `workspaceSymbol` hit's `LocationUri` (SYMBOLS) is a provider URI your query tool
+(QUERIES) reads back, and a stream tick (STREAMS) re-surfaces the new value wherever it's shown.
 
 For MCP tools: `ConfigureServices` registers the services your `[McpServerToolType]` classes inject (typically a singleton
 client to the running system); reference `ModelContextProtocol` with `CopyLocalLockFileAssemblies=false` so the host's copy
