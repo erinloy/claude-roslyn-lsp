@@ -7,6 +7,8 @@ daemon/bin/
 daemon/obj/
 client/bin/
 client/obj/
+cli/bin/
+cli/obj/
 
 # Runtime data (built bridge, downloaded Roslyn server, logs) — produced on device, never committed
 .data/
