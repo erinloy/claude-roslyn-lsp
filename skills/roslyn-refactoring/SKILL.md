@@ -17,10 +17,12 @@ A textual rename of `Order` hits `OrderLine`, `Reorder`, the word in a comment, 
 |---|---|
 | `rename_symbol(filePath, line, character, newName)` | Rename the symbol at a **0-based** file position everywhere. Best when you have a location (e.g. from an LSP/grep hit). |
 | `rename_symbol_by_name(fullyQualifiedName, newName)` | Rename a **type or namespace** by qualified name (e.g. `My.Ns.OldClass`, or a namespace `My.Old.Area`) when you don't have a position. |
+| `apply_code_action(filePath, line, character, title)` | Apply a Roslyn code action (a fix or refactoring) at a position, selected by its title, and write the result. |
+| `organize_imports(filePath)` | Remove unused and sort the file's `using`/`Imports` directives. |
 | `find_references(filePath, line, character)` | List every reference to the symbol — **read-only**. Use it to preview the blast radius before a rename. |
 | `format_document(filePath)` | Reformat a file with Roslyn's formatter and write it back. |
 
-Renames and formatting **write the edits to disk** and report the changed files. After a rename, re-read affected files before further editing them.
+These tools **write the edits to disk** and report the changed files. After one runs, re-read affected files before editing them further. (The same MCP server also exposes read-only navigation — `go_to_definition`, `hover`, `document_symbols`, `search_symbols`, `get_diagnostics`, `list_code_actions` — which overlap with Claude Code's LSP tool; this skill is about the mutating operations.)
 
 ## Recommended workflow
 
@@ -31,9 +33,9 @@ Renames and formatting **write the edits to disk** and report the changed files.
 
 ## Scoping in a large repo (important)
 
-The server loads a Roslyn workspace via MSBuild. In a monorepo, **do not let it open a 300-project umbrella solution** — set the environment variable **`CLAUDE_ROSLYN_SOLUTION`** to the specific subsystem solution (`.slnx`/`.sln`) or project (`.csproj`/`.vbproj`) you're working in, so only that graph loads (faster, less memory). This is the same variable the LSP bridge uses. Without it, the server discovers the nearest solution at/under the working directory.
+The tools run against the shared per-workspace daemon, which loads one Roslyn solution. In a monorepo, set **`CLAUDE_ROSLYN_SOLUTION`** to the specific subsystem solution (`.slnx`/`.sln`) or project (`.csproj`/`.vbproj`) you're working in, so the daemon scopes to that graph instead of a 300-project umbrella solution (faster, less memory). This is the same variable the LSP server uses. Without it, the daemon picks the nearest solution at or under the working directory.
 
-The first call loads the workspace (slow — MSBuild evaluation); subsequent calls are warm. After a rename, the workspace reloads from disk so later operations see current text.
+The first call after a cold daemon start can return an empty result while the solution finishes loading and `workspaceSymbol`'s index builds; retry once it is warm. Operations act on the daemon's loaded view of the solution.
 
 ## Notes / limits
 

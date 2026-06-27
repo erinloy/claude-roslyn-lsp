@@ -4,12 +4,12 @@ using ConsoleAppFramework;
 using Sluice;                   // ShmFrameListener — the client rendezvous (NamedPipeServerStream analogue)
 
 // The shared Roslyn daemon — one per workspace, owns ONE Roslyn language server + workspace, multiplexed onto many thin
-// clients over a named pipe. Launched (detached) by lsp-client.cs when no daemon for the workspace is yet running.
+// clients over a Sluice shared-memory channel. Launched (detached) by lsp-client.cs when no daemon for the workspace is yet running.
 await ConsoleApp.RunAsync(args, RunDaemon);
 
 /// <summary>Run the shared daemon.</summary>
 /// <param name="root">Workspace root (the LS rootUri; also drives solution discovery). Defaults to the cwd.</param>
-/// <param name="pipe">Named pipe to serve. Defaults to the key derived from the root (clients match it).</param>
+/// <param name="pipe">Channel key to serve (the Sluice rendezvous name). Defaults to the key derived from the root (clients match it).</param>
 /// <param name="solution">Explicit solution/project override. Defaults to CLAUDE_ROSLYN_SOLUTION, else discovery.</param>
 /// <param name="idleSeconds">Shut down after this long with zero clients.</param>
 /// <param name="ct">Wired by ConsoleAppFramework to Ctrl-C / SIGTERM.</param>

@@ -1,7 +1,7 @@
 {
   "name": "roslyn",
   "version": "0.1.0",
-  "description": "Gold-standard Roslyn C#/VB language server for Claude Code — analyzer shadow-copying (no build locks), native .slnx + .NET 10, built from source on device.",
+  "description": "Roslyn C#/VB language server for Claude Code: one shared per-workspace server, analyzer shadow-copying so builds never lock, native .slnx and .NET 10, with a refactoring MCP and an extension API for live systems.",
   "author": {
     "name": "Erin Loy",
     "email": "eloy@crazydogventures.com"

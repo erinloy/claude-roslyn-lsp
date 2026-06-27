@@ -1,6 +1,6 @@
 # claude-roslyn-lsp extensions
 
-Repo-declared extensions let an agent see a **running system**, not just the static codebase. The open-source LSP stays
+Repo-declared extensions let an agent see a **running system**, not just the static codebase. The LSP plugin stays
 system-agnostic; everything system-specific (the endpoint, the protocol, the data) lives in an extension assembly the repo
 points at, and the extension **dials out** to the running system itself.
 

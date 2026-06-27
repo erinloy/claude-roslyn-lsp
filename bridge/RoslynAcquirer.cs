@@ -7,8 +7,8 @@ namespace ClaudeRoslynLsp.Bridge;
 /// <summary>
 /// Ensures Microsoft's Roslyn language server (<c>Microsoft.CodeAnalysis.LanguageServer.&lt;rid&gt;</c>) is present on the
 /// device, downloading + extracting the per-platform NuGet package from nuget.org on first run and caching it under the
-/// plugin data dir. This is the gold-standard server VS 2026 / C# Dev Kit run; acquiring it (vs. shipping a binary) keeps
-/// the plugin source-only and lets it self-update to the latest published build.
+/// plugin data dir. This is the same server the C# Dev Kit runs; acquiring it (rather than shipping a binary) keeps the
+/// plugin source-only and lets it pick up the latest published build.
 /// </summary>
 internal static class RoslynAcquirer
 {
