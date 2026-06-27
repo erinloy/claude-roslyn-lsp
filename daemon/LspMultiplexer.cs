@@ -39,12 +39,16 @@ internal sealed class LspMultiplexer
     private long _nextGlobalId = 1; // 0 reserved for the daemon's own initialize
     private int _nextClientId = 0;
 
-    public LspMultiplexer(Stream lsIn, Stream lsOut, Action<string> log, CancellationToken ct)
+    private readonly IReadOnlyList<IDiagnosticExtension> _diagExtensions;
+
+    public LspMultiplexer(Stream lsIn, Stream lsOut, Action<string> log, CancellationToken ct,
+        IReadOnlyList<IDiagnosticExtension>? diagExtensions = null)
     {
         _lsWriter = new LspMessageWriter(lsIn);
         _lsReader = new LspMessageReader(lsOut);
         _log = log;
         _ct = ct;
+        _diagExtensions = diagExtensions ?? Array.Empty<IDiagnosticExtension>();
     }
 
     public int ClientCount => _clients.Count;
@@ -348,7 +352,44 @@ internal sealed class LspMultiplexer
         // 3. A "full" report carries the current item set (empty = clear); "unchanged"/no-report → leave clients as-is.
         if (kind != "full") { _log($"diag[{(resyncFromDisk ? "edit" : "open/refresh")}] {uri} → no report (kind={kind}) — skip"); return; }
         JsonArray items = (result!["items"] as JsonArray)?.DeepClone()?.AsArray() ?? new JsonArray();
+        await AugmentWithExtensionsAsync(uri, items, ct).ConfigureAwait(false);
         await PublishRoutedAsync(uri, items, resyncFromDisk).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Merge any extension-contributed diagnostics (live state from a running system) into a document's diagnostic set,
+    /// in place, before it's routed to clients. Each extension is isolated and time-bounded — one that's slow or throwing
+    /// must never block or break the file's normal Roslyn diagnostics.
+    /// </summary>
+    private async Task AugmentWithExtensionsAsync(string uri, JsonArray items, CancellationToken ct)
+    {
+        if (_diagExtensions.Count == 0) return;
+        string path;
+        try { path = LspEdits.UriToPath(uri); } catch { path = uri; }
+        foreach (IDiagnosticExtension ext in _diagExtensions)
+        {
+            try
+            {
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cts.CancelAfter(TimeSpan.FromSeconds(5)); // a stalled running-system call must not hold up edit feedback
+                IReadOnlyList<ExtDiagnostic> extra = await ext.GetDiagnosticsAsync(uri, path, cts.Token).ConfigureAwait(false);
+                string source = ext.GetType().Name;
+                foreach (ExtDiagnostic d in extra)
+                    items.Add(new JsonObject
+                    {
+                        ["range"] = new JsonObject
+                        {
+                            ["start"] = new JsonObject { ["line"] = d.Line, ["character"] = d.Character },
+                            ["end"] = new JsonObject { ["line"] = d.EndLine, ["character"] = d.EndCharacter },
+                        },
+                        ["severity"] = (int)d.Severity,
+                        ["code"] = d.Code,
+                        ["message"] = d.Message,
+                        ["source"] = source,
+                    });
+            }
+            catch (Exception ex) { _log($"diagnostic extension {ext.GetType().Name} failed for {uri}: {ex.Message}"); }
+        }
     }
 
     /// <summary>

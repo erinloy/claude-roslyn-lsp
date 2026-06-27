@@ -28,6 +28,9 @@
          frame-native (IFrameChannel was designed for LSP's Content-Length messages), zero-copy, faster than the
          named pipe it replaces. Vendored submodule under ___/external; this is its first in-repo consumer. -->
     <ProjectReference Include="../../___/external/Sluice/src/Sluice/Sluice.csproj" />
+    <!-- The system-agnostic extension contract: repo-declared extensions (.claude-roslyn/extensions.json) can augment a
+         file's diagnostics / hover with live state from a running system they dial out to (IDiagnosticExtension/IHoverExtension). -->
+    <ProjectReference Include="../extensions-api/ClaudeRoslynLsp.Extensions.Abstractions.csproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -37,6 +40,11 @@
     <Compile Include="../bridge/RoslynAcquirer.cs" Link="RoslynAcquirer.cs" />
     <Compile Include="../bridge/RoslynServer.cs" Link="RoslynServer.cs" />
     <Compile Include="../bridge/PipeKey.cs" Link="PipeKey.cs" />
+    <Compile Include="../bridge/LspEdits.cs" Link="LspEdits.cs" /> <!-- uri↔path for extension diagnostic augmentation -->
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="ClaudeRoslynLsp.Extensions" />
   </ItemGroup>
 
 </Project>

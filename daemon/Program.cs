@@ -49,7 +49,18 @@ static async Task RunDaemon(
         using var server = RoslynServer.Start(serverDll, logDir, Log);
         Log($"roslyn server pid {server.Id} started");
 
-        var mux = new LspMultiplexer(server.StandardInput.BaseStream, server.StandardOutput.BaseStream, Log, cts.Token);
+        // Load repo-declared extensions (.claude-roslyn/extensions.json) and dial them out to their running systems. The
+        // daemon uses the IDiagnosticExtension surface to merge live-system state into each file's published diagnostics.
+        var loadedExtensions = ExtensionLoader.Load(root, "daemon", Log);
+        var diagExtensions = new List<IDiagnosticExtension>();
+        foreach (var le in loadedExtensions)
+        {
+            try { await le.Extension.InitializeAsync(new ExtensionContext { WorkspaceRoot = root, Host = "daemon", Log = Log, Config = le.Config }, cts.Token).ConfigureAwait(false); }
+            catch (Exception ex) { Log($"extension '{le.Name}' init failed: {ex.Message}"); }
+            if (le.Extension is IDiagnosticExtension d) diagExtensions.Add(d);
+        }
+
+        var mux = new LspMultiplexer(server.StandardInput.BaseStream, server.StandardOutput.BaseStream, Log, cts.Token, diagExtensions);
         await mux.StartAsync(root, solutionOverride).ConfigureAwait(false);
 
         var idle = new IdleShutdown(mux, TimeSpan.FromSeconds(idleSeconds), Log, cts);
@@ -61,6 +72,7 @@ static async Task RunDaemon(
         await Task.WhenAny(accept, serverExit).ConfigureAwait(false);
 
         cts.Cancel();
+        foreach (var le in loadedExtensions) { try { await le.Extension.DisposeAsync().ConfigureAwait(false); } catch { } }
         try { if (!server.HasExited) server.Kill(entireProcessTree: true); } catch { }
         Log("daemon exiting");
     }

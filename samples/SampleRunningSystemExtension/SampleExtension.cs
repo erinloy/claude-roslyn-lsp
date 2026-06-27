@@ -22,11 +22,25 @@ namespace SampleRunningSystemExtension;
 /// } ] }
 /// </code>
 /// </summary>
-public sealed class SampleExtension : ICrlspExtension, IMcpToolExtension
+public sealed class SampleExtension : ICrlspExtension, IMcpToolExtension, IDiagnosticExtension
 {
     public string Name => "sample-running-system";
 
     private readonly SampleSystemClient _client = new();
+
+    // IDiagnosticExtension: merge a live-system signal into a file's diagnostics. The sample surfaces the running system's
+    // status as an info diagnostic at the top of every C# file; a real extension would, e.g., flag that the actuator a
+    // file defines is live and breaching a limit, anchored at the relevant line.
+    public Task<IReadOnlyList<ExtDiagnostic>> GetDiagnosticsAsync(string fileUri, string filePath, CancellationToken ct)
+    {
+        if (!filePath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
+            return Task.FromResult<IReadOnlyList<ExtDiagnostic>>(Array.Empty<ExtDiagnostic>());
+        var list = new List<ExtDiagnostic>
+        {
+            new(0, 0, 0, 0, ExtSeverity.Information, "RUNSYS001", $"[running-system] {_client.OneLineStatus()}"),
+        };
+        return Task.FromResult<IReadOnlyList<ExtDiagnostic>>(list);
+    }
 
     public Task InitializeAsync(ExtensionContext context, CancellationToken ct)
     {
@@ -53,6 +67,12 @@ public sealed class SampleSystemClient
     {
         _endpoint = endpoint;
         log("attached (sample reports the MCP host process itself as the running system)");
+    }
+
+    public string OneLineStatus()
+    {
+        Process p = Process.GetCurrentProcess();
+        return $"system '{_endpoint}' live — host pid {p.Id}, {p.Threads.Count} threads, {p.WorkingSet64 / 1024 / 1024} MB";
     }
 
     public string Status()
