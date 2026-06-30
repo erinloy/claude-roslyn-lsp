@@ -20,6 +20,19 @@ public sealed class RoslynDaemonClient : IAsyncDisposable
     private Action<JsonNode>? _onNotification;     // server→client notifications (e.g. textDocument/publishDiagnostics)
     private long _nextId;
 
+    // A request must never wait forever. The daemon/LS can accept a request and never answer it (the document's project
+    // is still loading, or a compilation wedged) — and since the shared-memory channel has no per-request failure signal,
+    // an unanswered request becomes an unbounded tool hang (observed: a get_diagnostics that hung for ~19h). Every
+    // RequestAsync is bounded by this timeout; override with CRLSP_REQUEST_TIMEOUT_SECONDS, or <=0 to disable the bound.
+    private static readonly TimeSpan RequestTimeout = ResolveRequestTimeout();
+
+    private static TimeSpan ResolveRequestTimeout()
+    {
+        if (int.TryParse(Environment.GetEnvironmentVariable("CRLSP_REQUEST_TIMEOUT_SECONDS"), out int s))
+            return s > 0 ? TimeSpan.FromSeconds(s) : Timeout.InfiniteTimeSpan; // <=0 -> no bound (explicit escape hatch)
+        return TimeSpan.FromSeconds(180); // generous: covers a cold workspace load + heavy solution-wide ops, kills true hangs
+    }
+
     private RoslynDaemonClient(IFrameChannel channel) => _channel = channel;
 
     /// <summary>Connect to the workspace daemon (starting it if needed) and complete the LSP initialize handshake.</summary>
@@ -54,9 +67,14 @@ public sealed class RoslynDaemonClient : IAsyncDisposable
         WriteFrame(Encoding.UTF8.GetBytes(
             new JsonObject { ["jsonrpc"] = "2.0", ["id"] = id, ["method"] = method, ["params"] = @params }.ToJsonString()));
 
-        // Fail the await if the caller cancels or the channel closes, so a tool call can't hang forever.
+        // Fail the await if the caller cancels, the channel closes, OR the request times out — so a tool call can't hang
+        // forever waiting on a response the daemon/LS will never send (project still loading / wedged compilation).
+        using var timeout = RequestTimeout == Timeout.InfiniteTimeSpan ? new CancellationTokenSource() : new CancellationTokenSource(RequestTimeout);
         using (ct.Register(() => tcs.TrySetCanceled(ct)))
         using (_closed.Token.Register(() => tcs.TrySetException(new IOException("daemon channel closed"))))
+        using (timeout.Token.Register(() => tcs.TrySetException(new TimeoutException(
+            $"roslyn daemon did not answer '{method}' within {RequestTimeout.TotalSeconds:0}s — the workspace may still be " +
+            "loading, or the language server wedged on this request; retry shortly, or restart the daemon"))))
         {
             try { return await tcs.Task.ConfigureAwait(false); }
             finally { _pending.TryRemove(id, out _); }
