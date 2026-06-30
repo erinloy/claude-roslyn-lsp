@@ -145,6 +145,7 @@ extension dll is never locked. Full contract and a worked example: [extensions-a
 | `CLAUDE_ROSLYN_VERSION` | Pin an exact Roslyn server version instead of the latest published. |
 | `CLAUDE_ROSLYN_SERVER_PATH` | Use an already-extracted `Microsoft.CodeAnalysis.LanguageServer.dll` and skip the download. |
 | `CLAUDE_ROSLYN_MULTI_REPO` | Set to `0` to disable cross-repo routing (each foreign file then loads in the home daemon as a loose file). |
+| `CRLSP_REQUEST_TIMEOUT_SECONDS` | Per-request bound for the refactor MCP / CLI daemon round-trip (default `180`). The language server can accept a request and never answer it (a project still loading, or a wedged compilation); the bound turns that into a clear `TimeoutException` instead of an unbounded hang. Raise it for a very large cold workspace; set `0` (or negative) to disable the bound entirely. |
 
 ## Running by hand
 
