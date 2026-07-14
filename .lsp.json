@@ -1,6 +1,6 @@
 {
   "csharp": {
-    "command": "pwsh",
+    "command": "${LOCALAPPDATA}\\Programs\\PowerShell\\7\\pwsh.exe",
     "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${CLAUDE_PLUGIN_ROOT}/boot/run.ps1", "client"],
     "transport": "stdio",
     "extensionToLanguage": {
