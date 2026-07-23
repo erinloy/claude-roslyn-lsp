@@ -1,6 +1,6 @@
 {
   "name": "roslyn",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Roslyn C#/VB language server for Claude Code: one shared per-workspace server, analyzer shadow-copying so builds never lock, native .slnx and .NET 10, with a refactoring MCP and an extension API for live systems.",
   "author": {
     "name": "Erin Loy",
