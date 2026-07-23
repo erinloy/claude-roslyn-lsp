@@ -6,9 +6,16 @@
   ENABLE_LSP_TOOL=1 alone is not enough on current builds. And **Claude Code auto-updates silently revert the patch**
   (the binary is replaced), so it must be re-applied after every update.
 
+  NOTE (2026-07-23): recent Claude Code builds (verified on 2.1.218) spawn the registered `.lsp.json` C# server
+  NATIVELY — the tweakcc patch is no longer required on those versions. `check` is therefore FUNCTIONAL, not a bare
+  marker test: it passes when CC is observed spawning the LSP client, and only falls back to warning about the legacy
+  patch when the tool is genuinely unconfirmed. This stops the check crying wolf every SessionStart on a version that
+  needs no patch (which surfaced as a spurious "SessionStart hook error / non-blocking status / no stderr").
+
   This script owns that dependency:
-    -Mode check  → is the patch applied for the CURRENTLY-INSTALLED CC version? (version-keyed marker) Prints guidance
-                   if not. Used by the SessionStart hook so every session re-checks — and re-warns after an update.
+    -Mode check  → is the builtin LSP tool working for the CURRENTLY-INSTALLED CC version? Passes if the tweakcc patch
+                   is applied (version-keyed marker) OR CC spawns the registered server natively (a running LSP client
+                   → writes a native-ok marker so later sessions pass instantly). Warns + exits 3 only when neither.
     -Mode apply  → install tweakcc (global if present, else npx) and apply `fix-lsp-support`, then write the marker.
                    The CC binary can only be patched while NO Claude process is running (Windows locks the running .exe).
                    In a multi-agent setup that means an all-sessions-closed window; this script refuses (cleanly) if any
@@ -32,22 +39,44 @@ function Test-CCRunning {
     # The native install is a single claude.exe; ANY running instance (sibling agents included) locks it.
     @(Get-Process -Name 'claude' -ErrorAction SilentlyContinue).Count
 }
+function Test-LspClientRunning {
+    # CC spawns the registered .lsp.json server as a `dotnet exec …ClaudeRoslynLsp.Client.dll` child when it honors the
+    # LSP registration. A running client ⇒ CC started the LSP (natively, or via the patch) ⇒ the tool is functional and
+    # the tweakcc patch is not needed. Cross-session: any sibling agent's running client proves native spawn for this CC.
+    try {
+        @(Get-CimInstance Win32_Process -Filter "Name='dotnet.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -match 'ClaudeRoslynLsp\.Client' }).Count
+    } catch { 0 }
+}
 
 $ccVersion = Get-CCVersion
 $marker = Join-Path $markerDir "applied-$ccVersion.marker"
+$nativeMarker = Join-Path $markerDir "native-ok-$ccVersion.marker"
 $patchApplied = Test-Path $marker
+$nativeOk = Test-Path $nativeMarker
 
 if ($Mode -eq 'check') {
     if ($patchApplied) { L "patch present for CC $ccVersion"; exit 0 }
+    if ($nativeOk) { L "native LSP spawn previously confirmed for CC $ccVersion — patch not needed"; exit 0 }
+
+    # Functional probe: recent CC builds spawn the registered .lsp.json server NATIVELY (no tweakcc patch needed). If the
+    # CC-spawned LSP client is running, the tool works regardless of the patch — record it (self-healing) and stop warning.
+    if ($ccVersion -ne 'unknown' -and (Test-LspClientRunning) -gt 0) {
+        "native LSP confirmed for CC $ccVersion at $([DateTime]::Now.ToString('o')) (client process running)" |
+            Out-File -FilePath $nativeMarker -Encoding utf8
+        L "native LSP spawn confirmed for CC $ccVersion (client running) — wrote native-ok marker"
+        exit 0
+    }
+
     $msg = @"
-[claude-roslyn-lsp] Claude Code's builtin LSP tool is NOT patched for CC $ccVersion.
-The C# language server cannot start until it is. CC auto-updates revert this patch, so it must be re-applied.
-To apply (requires ALL Claude sessions closed):
+[claude-roslyn-lsp] The builtin LSP tool is not confirmed working for CC $ccVersion (no patch marker, and no running LSP client observed yet).
+Recent CC builds spawn the registered C# server NATIVELY — if the LSP tool returns symbols on a warm index, no patch is needed and this check self-clears once the LSP client process is seen (e.g. after the first LSP call this session).
+Only if the LSP tool genuinely returns nothing on a warm index, apply the legacy tweakcc patch (requires ALL Claude sessions closed):
     pwsh -NoProfile -File "$PSCommandPath" -Mode apply
-Then relaunch Claude. (The roslyn refactoring MCP works regardless; only the LSP tool needs this.)
+Then relaunch Claude. (The roslyn refactoring MCP works regardless.)
 "@
     Write-Output $msg
-    L "patch MISSING for CC $ccVersion — warned"
+    L "unconfirmed for CC $ccVersion — warned (no marker, no client seen)"
     exit 3
 }
 
