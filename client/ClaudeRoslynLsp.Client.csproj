@@ -20,7 +20,7 @@
 
   <ItemGroup>
     <!-- Zero-serialization shared-memory IPC (erinloy/Sluice) — the client↔daemon transport (ShmFrameChannel). -->
-    <ProjectReference Include="../../___/external/Sluice/src/Sluice/Sluice.csproj" />
+    <ProjectReference Include="$(ExternalRoot)/Sluice/src/Sluice/Sluice.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -21,13 +21,13 @@
     <!-- VENDORED ConsoleAppFramework (___/external/consoleappframework), per the repo directive that anything on the
          command line uses it. Zero-dependency source generator (no runtime assembly) — Analyzer, ReferenceOutputAssembly
          false. It generates the subcommand routing, the help text, and a Ctrl-C-wired CancellationToken from the methods. -->
-    <ProjectReference Include="../../___/external/consoleappframework/src/ConsoleAppFramework/ConsoleAppFramework.csproj"
+    <ProjectReference Include="$(ExternalRoot)/consoleappframework/src/ConsoleAppFramework/ConsoleAppFramework.csproj"
                       OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
   <ItemGroup>
     <!-- Zero-serialization shared-memory IPC (erinloy/Sluice) — the CLI↔daemon transport (ShmFrameChannel). -->
-    <ProjectReference Include="../../___/external/Sluice/src/Sluice/Sluice.csproj" />
+    <ProjectReference Include="$(ExternalRoot)/Sluice/src/Sluice/Sluice.csproj" />
   </ItemGroup>
 
   <ItemGroup>

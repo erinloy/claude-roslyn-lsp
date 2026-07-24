@@ -28,6 +28,38 @@ $projects = @(
     @{ name = 'cli';    csproj = 'cli\ClaudeRoslynLsp.Cli.csproj';       dll = 'cli\bin\Release\net8.0\crlsp.dll' }
 )
 
+# --- Locate the vendored sibling libraries (Sluice, ConsoleAppFramework) ------------------------------------------
+# The projects reference them relative to a normal CHECKOUT (../___/external). An INSTALLED plugin is a copy in Claude's
+# plugin cache, where that path resolves to nothing and EVERY build fails with MSB9008 — silently, since this script only
+# logged it. That froze the deployed binaries: the LSP kept running whatever was built the day the reference landed, so
+# fixes made afterwards never reached it. Resolve the root here and hand it to MSBuild (Directory.Build.props reads it).
+function Resolve-ExternalRoot([string]$root) {
+    $candidates = @()
+    if ($env:ZILTCH_EXTERNAL_ROOT) { $candidates += $env:ZILTCH_EXTERNAL_ROOT }
+    $candidates += (Join-Path $root '..\___\external')                # normal checkout: the sibling repo
+    # An installed copy has lost that context — recover it from the marketplace this plugin was installed FROM.
+    $mk = Join-Path $env:USERPROFILE '.claude\plugins\known_marketplaces.json'
+    if (Test-Path $mk) {
+        try {
+            $json = Get-Content $mk -Raw | ConvertFrom-Json
+            foreach ($m in $json.PSObject.Properties.Value) {
+                $src = $m.source
+                if ($src -is [string]) { $dir = $src } elseif ($src.path) { $dir = $src.path } elseif ($src.source) { $dir = $src.source } else { continue }
+                if ($dir -and (Test-Path $dir)) { $candidates += (Join-Path $dir '..\___\external') }
+            }
+        } catch { }
+    }
+    foreach ($c in $candidates) {
+        try { $full = (Resolve-Path $c -ErrorAction Stop).Path } catch { continue }
+        if (Test-Path (Join-Path $full 'Sluice\src\Sluice\Sluice.csproj')) { return $full }
+    }
+    return $null
+}
+
+$externalRoot = Resolve-ExternalRoot $Root
+if ($externalRoot) { $env:ZILTCH_EXTERNAL_ROOT = $externalRoot; L "external root: $externalRoot" }
+else { L "WARN: could not locate the vendored externals (Sluice) — builds will fail with MSB9008" }
+
 $bridgeDir = Join-Path $Root 'bridge'
 function Newest-Source([string]$projDir) {
     $files = @()
@@ -41,6 +73,7 @@ function Newest-Source([string]$projDir) {
     ($files | Measure-Object -Property LastWriteTimeUtc -Maximum).Maximum
 }
 
+$failed = @()
 $mutex = New-Object System.Threading.Mutex($false, 'ClaudeRoslynLspBuild')
 $held = $false
 try { $held = $mutex.WaitOne([TimeSpan]::FromMinutes(5)) } catch [System.Threading.AbandonedMutexException] { $held = $true } catch { $held = $true }
@@ -60,11 +93,22 @@ try {
 
         L "building $($p.name) ..."
         $out = & dotnet build $csproj -c Release -v quiet --nologo 2>&1
-        if ($LASTEXITCODE -ne 0) { L "BUILD FAILED $($p.name) (exit $LASTEXITCODE): $($out -join "`n")" }
+        if ($LASTEXITCODE -ne 0) {
+            L "BUILD FAILED $($p.name) (exit $LASTEXITCODE): $($out -join "`n")"
+            $failed += $p.name
+        }
         else { L "built $($p.name)" }
     }
 }
 finally { if ($held) { try { $mutex.ReleaseMutex() } catch {} } }
+
+# A failed build here means the plugin keeps RUNNING ITS OLD BINARIES — the most misleading failure mode there is, since
+# everything still works, just at whatever version last built. It went unnoticed for weeks as a log line. Say it out loud
+# (SessionStart output reaches the agent) so a stale deploy can never again be the quiet explanation for a fixed bug.
+if ($failed.Count -gt 0) {
+    Write-Host "[roslyn-lsp] BUILD FAILED for: $($failed -join ', ') — the LSP/MCP is running STALE binaries." -ForegroundColor Red
+    Write-Host "[roslyn-lsp] see $logFile — until this builds, fixes to the plugin are NOT deployed."
+}
 
 # --- Pre-warm the shared daemon for THIS workspace ---------------------------------------------------------------
 # The first .cs edit otherwise pays a cold start (daemon boot + loading a 300-project solution) while Claude's LSP
@@ -73,7 +117,15 @@ finally { if ($held) { try { $mutex.ReleaseMutex() } catch {} } }
 # makes any duplicate exit instantly, and we skip when one is already alive.
 function PreWarm-Daemon {
     $ws = $env:CLAUDE_PROJECT_DIR
-    if ([string]::IsNullOrWhiteSpace($ws)) { $ws = (Get-Location).Path }
+    if ([string]::IsNullOrWhiteSpace($ws)) {
+        # Run by hand rather than by the hook: the cwd is whatever the shell happened to be in. Only prewarm if it is
+        # actually a workspace — otherwise we start a daemon that indexes e.g. the user's home directory and serves no one.
+        $ws = (Get-Location).Path
+        $isWorkspace = (Test-Path (Join-Path $ws '.git')) -or
+                       (Get-ChildItem -Path $ws -Filter *.sln -File -ErrorAction SilentlyContinue) -or
+                       (Get-ChildItem -Path $ws -Filter *.slnx -File -ErrorAction SilentlyContinue)
+        if (-not $isWorkspace) { L "prewarm SKIP: no CLAUDE_PROJECT_DIR and cwd is not a workspace ($ws)"; return }
+    }
     $daemonDll = Join-Path $Root 'daemon\bin\Release\net8.0\ClaudeRoslynLsp.Daemon.dll'
     if (-not (Test-Path $daemonDll)) { L "prewarm SKIP: daemon dll missing ($daemonDll)"; return }
 

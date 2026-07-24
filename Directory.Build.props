@@ -1,0 +1,23 @@
+<Project>
+
+  <!--
+    Where the vendored sibling libraries (Sluice, ConsoleAppFramework) live.
+
+    The plugin's projects reference them by PROJECT, not package, because the host repo vendors them. In a normal
+    checkout the sibling repo sits next to this one, so the relative path below resolves and nothing else is needed.
+
+    An INSTALLED plugin is a different matter: Claude Code copies this tree into its plugin cache, where the relative
+    path resolves to nothing — every build then fails with MSB9008 "the referenced project does not exist". That failure
+    was silent for weeks (ensure-built.ps1 only logged it to a file), which froze the deployed binaries at whatever they
+    were on the day the reference was introduced. Stale binaries are how a fixed bug keeps happening.
+
+    So the root is a PROPERTY with a probe order: an explicit override first, then the checkout-relative default.
+    boot/ensure-built.ps1 sets ZILTCH_EXTERNAL_ROOT when it detects it is running from a detached copy, which is what
+    makes the installed plugin buildable — and therefore refreshable — in place.
+  -->
+  <PropertyGroup>
+    <ExternalRoot Condition="'$(ExternalRoot)' == '' and '$(ZILTCH_EXTERNAL_ROOT)' != ''">$(ZILTCH_EXTERNAL_ROOT)</ExternalRoot>
+    <ExternalRoot Condition="'$(ExternalRoot)' == ''">$(MSBuildThisFileDirectory)../___/external</ExternalRoot>
+  </PropertyGroup>
+
+</Project>

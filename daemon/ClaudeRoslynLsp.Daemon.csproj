@@ -19,7 +19,7 @@
          anything on the command line uses it. It is a zero-dependency source generator (no runtime assembly) — referenced
          as an Analyzer with ReferenceOutputAssembly=false. It generates the arg parsing, help, and a Ctrl-C/SIGTERM-wired
          CancellationToken from RunDaemon's signature. -->
-    <ProjectReference Include="../../___/external/consoleappframework/src/ConsoleAppFramework/ConsoleAppFramework.csproj"
+    <ProjectReference Include="$(ExternalRoot)/consoleappframework/src/ConsoleAppFramework/ConsoleAppFramework.csproj"
                       OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
@@ -27,7 +27,7 @@
     <!-- Zero-serialization shared-memory IPC (erinloy/Sluice). The client↔daemon hop is a Sluice ShmFrameChannel —
          frame-native (IFrameChannel was designed for LSP's Content-Length messages), zero-copy, faster than the
          named pipe it replaces. Vendored submodule under ___/external; this is its first in-repo consumer. -->
-    <ProjectReference Include="../../___/external/Sluice/src/Sluice/Sluice.csproj" />
+    <ProjectReference Include="$(ExternalRoot)/Sluice/src/Sluice/Sluice.csproj" />
     <!-- The system-agnostic extension contract: repo-declared extensions (.claude-roslyn/extensions.json) can augment a
          file's diagnostics / hover with live state from a running system they dial out to (IDiagnosticExtension/IHoverExtension). -->
     <ProjectReference Include="../extensions-api/ClaudeRoslynLsp.Extensions.Abstractions.csproj" />
