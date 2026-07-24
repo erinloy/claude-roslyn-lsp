@@ -39,6 +39,18 @@ public sealed class DaemonSession : IAsyncDisposable
         finally { _gate.Release(); }
     }
 
+    /// <summary>Drop the cached connection so the next call reconnects (and restarts the daemon if it is gone).</summary>
+    /// <remarks>Without this, one wedged or closed channel poisons the whole MCP session: the client is cached for the
+    /// process lifetime, so every later tool call would keep failing against the same dead link. A bounded call that
+    /// leaves a poisoned connection behind has only turned one hang into an unending series of errors.</remarks>
+    public void Invalidate()
+    {
+        RoslynDaemonClient? dead = Interlocked.Exchange(ref _client, null);
+        if (dead is null) return;
+        _log("dropping the daemon connection — the next call will reconnect");
+        _ = Task.Run(async () => { try { await dead.DisposeAsync().ConfigureAwait(false); } catch { } });
+    }
+
     public async ValueTask DisposeAsync()
     {
         if (_client is { } c) await c.DisposeAsync().ConfigureAwait(false);

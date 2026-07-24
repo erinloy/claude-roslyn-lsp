@@ -42,7 +42,7 @@ public sealed class RoslynDaemonClient : IAsyncDisposable
         Action<JsonNode>? onNotification = null)
     {
         string endpoint = PipeKey.ForRoot(root);
-        IFrameChannel? ch = await DaemonConnector.ConnectAsync(endpoint, root, solution, pluginRoot, log).ConfigureAwait(false);
+        IFrameChannel? ch = await DaemonConnector.ConnectAsync(endpoint, root, solution, pluginRoot, log, ct).ConfigureAwait(false);
         if (ch is null) return null;
 
         var c = new RoslynDaemonClient(ch) { _onNotification = onNotification };

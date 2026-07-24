@@ -11,8 +11,11 @@ namespace ClaudeRoslynLsp.Bridge;
 public static class DaemonConnector
 {
     /// <summary>Connect to the workspace's daemon, starting it (once, election-guarded) if none is alive yet.</summary>
+    /// <param name="ct">Cancels the spin-up wait. Without it a caller's own deadline could not reach this loop, so a
+    /// daemon that never comes up would hold the caller for the full ~120s regardless of its budget.</param>
     public static async Task<IFrameChannel?> ConnectAsync(
-        string endpoint, string root, string? solution, string pluginRoot, Action<string> log)
+        string endpoint, string root, string? solution, string pluginRoot, Action<string> log,
+        CancellationToken ct = default)
     {
         // 1. Fast path: a daemon is already alive → connect to it.
         if (DaemonAlive(endpoint) && TryConnect(endpoint) is { } fast) return fast;
@@ -28,11 +31,12 @@ public static class DaemonConnector
                 log("no daemon — starting one (detached)");
                 StartDaemon(pluginRoot, root, solution, log);
             }
-            // 3. Wait for the daemon to come up (first start also loads the workspace), then connect.
-            for (int i = 0; i < 240; i++) // up to ~120s
+            // 3. Wait for the daemon to come up (first start also loads the workspace), then connect. Bounded twice: by
+            //    the loop (~120s) and by the caller's token, so a caller with a tighter deadline is never held past it.
+            for (int i = 0; i < 240 && !ct.IsCancellationRequested; i++) // up to ~120s
             {
                 if (DaemonAlive(endpoint) && TryConnect(endpoint) is { } p) return p;
-                await Task.Delay(500).ConfigureAwait(false);
+                try { await Task.Delay(500, ct).ConfigureAwait(false); } catch (OperationCanceledException) { break; }
             }
             return null;
         }
@@ -87,6 +91,18 @@ public static class DaemonConnector
         catch (Exception ex) { log($"failed to start daemon: {ex.Message}"); }
     }
 
+    // A first-run build must not be able to park the caller forever: a `dotnet build` that wedges (NuGet restore hung on a
+    // dead feed, an MSBuild node deadlocked on a locked output) has no self-timeout, so an unbounded WaitForExit here is a
+    // silent infinite hang on the connect path. Bounded, and the process is killed when it overruns.
+    private static readonly TimeSpan BuildCeiling = ResolveBuildCeiling();
+
+    private static TimeSpan ResolveBuildCeiling()
+    {
+        if (int.TryParse(Environment.GetEnvironmentVariable("CRLSP_BUILD_TIMEOUT_SECONDS"), out int s) && s > 0)
+            return TimeSpan.FromSeconds(s);
+        return TimeSpan.FromMinutes(10); // a cold restore + full Release build of the daemon, with room to spare
+    }
+
     // Build a project to its Release DLL exactly once across all instances. The mutex collapses N concurrent
     // first-launches into ONE build (the rest wait, then find the DLL present) — the cure for the build-lock race.
     private static void EnsureBuilt(string csproj, string dll, string label, Action<string> log)
@@ -106,11 +122,27 @@ public static class DaemonConnector
             psi.ArgumentList.Add("build"); psi.ArgumentList.Add(csproj);
             psi.ArgumentList.Add("-c"); psi.ArgumentList.Add("Release");
             using var p = Process.Start(psi)!;
-            string err = p.StandardError.ReadToEnd();
-            p.WaitForExit();
-            if (p.ExitCode != 0) log($"{label} build failed (exit {p.ExitCode}): {err}");
+            // Drain BOTH pipes asynchronously: a synchronous ReadToEnd on one while the other fills its buffer deadlocks
+            // the child (a classic redirect hang) — which no timeout below could distinguish from a slow build.
+            Task<string> errTask = p.StandardError.ReadToEndAsync();
+            Task<string> outTask = p.StandardOutput.ReadToEndAsync();
+            if (!p.WaitForExit((int)BuildCeiling.TotalMilliseconds))
+            {
+                log($"{label} build exceeded {BuildCeiling.TotalMinutes:0} min — killing it (build the plugin manually to see why)");
+                try { p.Kill(entireProcessTree: true); } catch { }
+                return;
+            }
+            _ = outTask;
+            if (p.ExitCode != 0) log($"{label} build failed (exit {p.ExitCode}): {Drain(errTask)}");
         }
         catch (Exception ex) { log($"{label} build error: {ex.Message}"); }
         finally { if (held) { try { buildLock.ReleaseMutex(); } catch { } } }
+    }
+
+    // The child has exited, so both pipes are at EOF and this completes at once; the wait is only a formality.
+    private static string Drain(Task<string> pipe)
+    {
+        try { return pipe.Wait(TimeSpan.FromSeconds(5)) ? pipe.Result : "(output unavailable)"; }
+        catch { return "(output unavailable)"; }
     }
 }

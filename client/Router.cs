@@ -43,6 +43,30 @@ internal sealed class DaemonRouter : IDisposable
 
     private readonly bool _multiRepo;            // false → every file stays on the primary (kill-switch), watch still active
 
+    // ---- request watchdog --------------------------------------------------------------------------------------------
+    //
+    // Daemon DEATH is already handled (WatchDaemon → exit → the host restarts us). The other, subtler wedge is a daemon
+    // that is ALIVE and simply never answers: shared memory carries no per-request failure signal, so a request the
+    // language server accepts and drops parks the host's LSP call FOREVER (observed: a 2h+ hang the user had to kill).
+    // A relay must therefore bound every request it carries, exactly as RoslynDaemonClient bounds its own. When a request
+    // exceeds the ceiling we cancel it upstream and synthesize the JSON-RPC error response the host is waiting on — so an
+    // LSP call ALWAYS terminates: with an answer, or with an error, never with an unbounded wait.
+    // Override with CRLSP_LSP_REQUEST_TIMEOUT_SECONDS; <=0 disables the bound (explicit escape hatch).
+    private static readonly TimeSpan RequestCeiling = ResolveRequestCeiling();
+
+    private static TimeSpan ResolveRequestCeiling()
+    {
+        if (int.TryParse(Environment.GetEnvironmentVariable("CRLSP_LSP_REQUEST_TIMEOUT_SECONDS"), out int s))
+            return s > 0 ? TimeSpan.FromSeconds(s) : Timeout.InfiniteTimeSpan;
+        return TimeSpan.FromSeconds(180); // generous: covers a cold workspace load + heavy solution-wide ops
+    }
+
+    private sealed record Pending(string Method, IFrameChannel? Channel, long StartedTicks);
+
+    private readonly ConcurrentDictionary<long, Pending> _inflight = new();   // id → request awaiting an answer
+    private readonly ConcurrentDictionary<long, long> _abandoned = new();     // id → tick we errored it (drop a late answer)
+    private readonly Timer? _watchdog;
+
     public DaemonRouter(IFrameChannel primary, string homeRoot, string pluginRoot, LspMessageWriter writer,
         Action<string> log, CancellationToken ct, Action onPrimaryDeath, bool multiRepo)
     {
@@ -54,11 +78,15 @@ internal sealed class DaemonRouter : IDisposable
         _ct = ct;
         _onPrimaryDeath = onPrimaryDeath;
         _multiRepo = multiRepo;
+        _watchdog = RequestCeiling == Timeout.InfiniteTimeSpan
+            ? null
+            : new Timer(_ => { try { SweepInflight(); } catch { } }, null, 2000, 2000);
         StartDownPump(primary, filterInit: false, isPrimary: true); // primary relays everything incl. Claude's real init response
     }
 
     public void Dispose()
     {
+        _watchdog?.Dispose();
         foreach (var kv in _secondaries)
             if (kv.Value.Channel is { } ch) { try { ch.Dispose(); } catch { } }
     }
@@ -67,10 +95,86 @@ internal sealed class DaemonRouter : IDisposable
     public void Up(LspMessage msg)
     {
         string? foreignRoot = ResolveForeignRoot(msg);
-        if (foreignRoot is null) { WriteTo(_primary, msg.Raw); return; }   // home file / no uri → primary (unchanged path)
+        if (foreignRoot is null) { TrackRequest(msg, _primary); WriteTo(_primary, msg.Raw); return; }   // home file / no uri → primary
 
         Secondary sec = _secondaries.GetOrAdd(foreignRoot, r => new Secondary(r));
+        TrackRequest(msg, sec.Channel);   // may still be connecting: null channel → we can't cancel upstream, but we still answer Claude
         sec.Send(msg.Raw, this);
+    }
+
+    // Record an outbound REQUEST (carries BOTH id and method) so the watchdog can bound it. Notifications (no id) and
+    // Claude's own responses (no method) are fire-and-forget. `initialize`/`shutdown` are exempt: a cold daemon
+    // legitimately takes minutes to load the solution, and the LSP host owns that wait via its own startupTimeout.
+    private void TrackRequest(LspMessage msg, IFrameChannel? channel)
+    {
+        if (_watchdog is null) return;
+        JsonNode? j;
+        try { j = msg.Json; } catch { return; }
+        if (j?["method"]?.GetValue<string>() is not { } method) return;
+
+        if (method == "$/cancelRequest")   // Claude cancelled it itself — stop watching that id
+        {
+            if (long.TryParse(j["params"]?["id"]?.ToString(), out long cancelled)) _inflight.TryRemove(cancelled, out _);
+            return;
+        }
+        if (method is "initialize" or "shutdown") return;
+        if (j["id"] is not { } idNode || !long.TryParse(idNode.ToString(), out long id)) return;
+        _inflight[id] = new Pending(method, channel, Environment.TickCount64);
+    }
+
+    // Fail every request past the ceiling: cancel it upstream (best effort) and answer Claude with a JSON-RPC error, so
+    // the call returns instead of hanging. The id goes on the abandoned list so a late answer is dropped, never delivered
+    // twice. Runs on a timer thread; never throws (the caller swallows).
+    private void SweepInflight()
+    {
+        long now = Environment.TickCount64;
+        long ceilMs = (long)RequestCeiling.TotalMilliseconds;
+
+        foreach (var kv in _inflight)
+        {
+            if (now - kv.Value.StartedTicks < ceilMs) continue;
+            if (!_inflight.TryRemove(kv.Key, out Pending? p)) continue;
+            _abandoned[kv.Key] = now;
+            _log($"request '{p.Method}' (id {kv.Key}) unanswered after {RequestCeiling.TotalSeconds:0}s — cancelling it and failing the call");
+
+            if (p.Channel is { } ch)
+                WriteTo(ch, Encoding.UTF8.GetBytes(new JsonObject
+                {
+                    ["jsonrpc"] = "2.0", ["method"] = "$/cancelRequest", ["params"] = new JsonObject { ["id"] = kv.Key },
+                }.ToJsonString()));
+
+            WriteDown(Encoding.UTF8.GetBytes(new JsonObject
+            {
+                ["jsonrpc"] = "2.0",
+                ["id"] = kv.Key,
+                ["error"] = new JsonObject
+                {
+                    ["code"] = -32603,
+                    ["message"] = $"roslyn daemon did not answer '{p.Method}' within {RequestCeiling.TotalSeconds:0}s — " +
+                                  "the workspace may still be loading, or the language server wedged on this request; " +
+                                  "retry shortly, or restart the daemon",
+                },
+            }.ToJsonString()));
+        }
+
+        foreach (var kv in _abandoned)   // forget abandoned ids once no plausible late answer can still arrive
+            if (now - kv.Value > 300_000) _abandoned.TryRemove(kv.Key, out _);
+    }
+
+    // A frame the daemon sent: true if it answers a request we are (or were) tracking. Clears the inflight entry, and
+    // reports "drop" for an id we already errored so Claude never sees two responses for one request.
+    private bool IsStaleAnswer(byte[] frame)
+    {
+        if (_watchdog is null || (_inflight.IsEmpty && _abandoned.IsEmpty)) return false;
+        try
+        {
+            JsonNode? j = JsonNode.Parse(frame);
+            if (j?["method"] is not null || j?["id"] is not { } idNode) return false;   // not a response
+            if (!long.TryParse(idNode.ToString(), out long id)) return false;
+            _inflight.TryRemove(id, out _);
+            return _abandoned.TryRemove(id, out _);   // late answer to a request we already failed → drop it
+        }
+        catch { return false; }
     }
 
     // ---- secondary lifecycle -----------------------------------------------------------------------------------------
@@ -81,7 +185,7 @@ internal sealed class DaemonRouter : IDisposable
         {
             string endpoint = PipeKey.ForRoot(sec.Root);
             _log($"multi-repo: connecting secondary daemon for {sec.Root}");
-            IFrameChannel? ch = await DaemonConnector.ConnectAsync(endpoint, sec.Root, null, _pluginRoot, _log).ConfigureAwait(false);
+            IFrameChannel? ch = await DaemonConnector.ConnectAsync(endpoint, sec.Root, null, _pluginRoot, _log, _ct).ConfigureAwait(false);
             if (ch is null)
             {
                 _log($"multi-repo: secondary connect FAILED for {sec.Root} — routing those files to the primary (loose) instead");
@@ -107,6 +211,14 @@ internal sealed class DaemonRouter : IDisposable
         try { channel.WriteFrame(raw, _ct); } catch (Exception ex) { _log($"write failed: {ex.Message}"); }
     }
 
+    /// <summary>Write one message body down to Claude, re-framed with Content-Length. The ONE stdout seam — the down-pumps
+    /// and the watchdog's synthetic error responses all go through it, so they can never interleave mid-frame.</summary>
+    private void WriteDown(byte[] frame)
+    {
+        try { lock (_writeLock) { _writer.WriteRawAsync(frame, _ct).GetAwaiter().GetResult(); } }
+        catch (Exception ex) { _log($"downstream write failed: {ex.Message}"); }
+    }
+
     private void StartDownPump(IFrameChannel channel, bool filterInit, bool isPrimary)
     {
         var t = new Thread(() =>
@@ -123,7 +235,8 @@ internal sealed class DaemonRouter : IDisposable
                         channel.AdvanceFrame();
                         if (wantPid && TryDaemonPid(frame, out int dpid)) { wantPid = false; WatchDaemon(dpid, isPrimary, channel); continue; }
                         if (wantInit && IsInitSentinelResponse(frame)) { wantInit = false; continue; } // drop our synthetic init response
-                        lock (_writeLock) { _writer.WriteRawAsync(frame, _ct).GetAwaiter().GetResult(); } // re-frame with Content-Length to Claude
+                        if (IsStaleAnswer(frame)) continue;   // clears the watchdog entry; drops a late answer we already errored
+                        WriteDown(frame);                     // re-frame with Content-Length to Claude
                     }
                 }
             }
