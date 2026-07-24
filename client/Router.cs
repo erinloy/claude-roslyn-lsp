@@ -161,6 +161,48 @@ internal sealed class DaemonRouter : IDisposable
             if (now - kv.Value > 300_000) _abandoned.TryRemove(kv.Key, out _);
     }
 
+    // ---- diagnostic severity filter ----------------------------------------------------------------------------------
+    //
+    // Roslyn publishes IDE style suggestions (IDE0001 "Name can be simplified", IDE1006 naming, CA2007 ConfigureAwait) at
+    // the same severity channel as real errors. An LSP host that surfaces every published diagnostic to an agent spends a
+    // large share of its context on hints about files it merely touched — hundreds of lines per edit, none actionable, and
+    // it crowds out the errors that are. Filter at the relay so only diagnostics at or above the threshold reach the host.
+    // CRLSP_DIAGNOSTIC_MIN_SEVERITY: 1=error, 2=warning (default), 3=info, 4=hint. 4 restores the unfiltered stream.
+    private static readonly int MinSeverity = ResolveMinSeverity();
+
+    private static int ResolveMinSeverity()
+        => int.TryParse(Environment.GetEnvironmentVariable("CRLSP_DIAGNOSTIC_MIN_SEVERITY"), out int s) && s is >= 1 and <= 4
+            ? s
+            : 2; // errors + warnings: everything that means the code is wrong, nothing that means it could be prettier
+
+    // Rewrite a publishDiagnostics notification to drop below-threshold entries. Filters the ARRAY rather than dropping the
+    // frame — a file with one error and forty hints must still deliver the error. An empty result is still published (that
+    // is how the host learns a file went clean). Any non-diagnostic frame passes straight through, unparsed.
+    private static byte[] FilterDiagnostics(byte[] frame)
+    {
+        if (MinSeverity >= 4) return frame;
+        // Cheap pre-check: only the diagnostics notification is worth parsing, and it is a small fraction of frames.
+        if (frame.AsSpan().IndexOf("publishDiagnostics"u8) < 0) return frame;
+        try
+        {
+            JsonNode? j = JsonNode.Parse(frame);
+            if (j?["method"]?.GetValue<string>() != "textDocument/publishDiagnostics") return frame;
+            if (j["params"]?["diagnostics"] is not JsonArray diags || diags.Count == 0) return frame;
+
+            var kept = new JsonArray();
+            foreach (JsonNode? d in diags)
+            {
+                // An absent severity means "undefined" in LSP, which callers treat as error — keep it.
+                int sev = d?["severity"]?.GetValue<int>() ?? 1;
+                if (sev <= MinSeverity) kept.Add(d!.DeepClone());
+            }
+            if (kept.Count == diags.Count) return frame;   // nothing filtered — hand back the original bytes
+            j["params"]!["diagnostics"] = kept;
+            return Encoding.UTF8.GetBytes(j.ToJsonString());
+        }
+        catch { return frame; }   // never let a malformed frame cost the host its diagnostics
+    }
+
     // A frame the daemon sent: true if it answers a request we are (or were) tracking. Clears the inflight entry, and
     // reports "drop" for an id we already errored so Claude never sees two responses for one request.
     private bool IsStaleAnswer(byte[] frame)
@@ -236,7 +278,7 @@ internal sealed class DaemonRouter : IDisposable
                         if (wantPid && TryDaemonPid(frame, out int dpid)) { wantPid = false; WatchDaemon(dpid, isPrimary, channel); continue; }
                         if (wantInit && IsInitSentinelResponse(frame)) { wantInit = false; continue; } // drop our synthetic init response
                         if (IsStaleAnswer(frame)) continue;   // clears the watchdog entry; drops a late answer we already errored
-                        WriteDown(frame);                     // re-frame with Content-Length to Claude
+                        WriteDown(FilterDiagnostics(frame));  // re-frame with Content-Length to Claude, style-noise removed
                     }
                 }
             }
