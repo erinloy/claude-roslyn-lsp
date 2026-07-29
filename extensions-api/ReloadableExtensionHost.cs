@@ -113,6 +113,7 @@ public sealed class ReloadableExtensionHost : IAsyncDisposable
             // Swap in only after a clean init, so a failed reload never replaces a working instance.
             ICrlspExtension? oldExt; ExtensionLoadContext? oldAlc;
             lock (_gate) { oldExt = slot.Ext; oldAlc = slot.Alc; slot.Ext = ext; slot.Alc = newAlc; }
+            slot.ContentHash = TryHash(slot.OriginalPath);   // what is NOW loaded — the identity a later rewrite is compared against
             RebuildSnapshots();
             _log($"extension '{slot.Name}' {(initial ? "loaded" : "RELOADED")} ({type.FullName}) for host '{_hostName}'");
 
@@ -164,11 +165,38 @@ public sealed class ReloadableExtensionHost : IAsyncDisposable
         {
             if (!await WaitReadableAsync(slot.OriginalPath).ConfigureAwait(false))
             { _log($"extension '{slot.Name}' dll not readable after rebuild — skipping reload"); return; }
+
+            // CONTENT-IDENTITY GATE. A build REWRITES this dll whether or not the code changed (the watcher fires on
+            // LastWrite|Size|CreationTime), and a reload is not free: it ends in _onReloaded(), which for the daemon is
+            // RefreshDiagnostics(null) — a re-diagnose of EVERY open document. On a shared workspace that set only grows,
+            // so an unchanged-dll reload costs O(open docs) of pure waste and does it once per rebuild per agent.
+            // MEASURED 2026-07-29 before this gate: 199,484 diag[open/refresh] events over 202 distinct files
+            // (987 per file) while the open set grew 116 -> 202 inside one window; the server sat at 23.7 GB and
+            // ~2.7 cores after 5.4 h. Same content ⇒ nothing to surface ⇒ skip the load AND the refresh.
+            // FAIL-OPEN: an unreadable/unhashable dll returns null and falls through to the reload, i.e. today's
+            // behaviour — a missed skip costs one refresh, whereas a wrong skip would leave a stale extension loaded.
+            string? fresh = TryHash(slot.OriginalPath);
+            if (fresh is not null && fresh == slot.ContentHash)
+            { _log($"extension '{slot.Name}' rewritten with IDENTICAL content — reload skipped (no diagnostics refresh)"); return; }
+
             bool ok = await LoadIntoSlotAsync(slot, initial: false).ConfigureAwait(false);
             if (ok) { try { _onReloaded(); } catch (Exception ex) { _log($"onReloaded handler threw: {ex.Message}"); } }
         }
         catch (Exception ex) { _log($"extension '{slot.Name}' reload error: {ex.Message}"); }
         finally { Interlocked.Exchange(ref slot.Reloading, 0); }
+    }
+
+    /// <summary>SHA-256 of a file, or null if it cannot be read right now. Null is the FAIL-OPEN signal: the caller
+    /// proceeds with the reload rather than assuming identity, because a wrong "identical" verdict would strand a stale
+    /// extension while a missed skip only costs one refresh.</summary>
+    private static string? TryHash(string path)
+    {
+        try
+        {
+            using var s = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(s));
+        }
+        catch { return null; }
     }
 
     /// <summary>Wait until the rebuilt dll can be opened (the build has finished writing it).</summary>
@@ -216,5 +244,6 @@ public sealed class ReloadableExtensionHost : IAsyncDisposable
         public FileSystemWatcher? Watcher;
         public Timer? Debounce;
         public int Reloading; // 0/1 guard so overlapping watcher events don't reload concurrently
+        public string? ContentHash; // SHA-256 of OriginalPath as loaded — a rewrite with the SAME hash is not a reload
     }
 }
