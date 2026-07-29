@@ -36,6 +36,7 @@ internal sealed class LspMultiplexer
     private readonly ConcurrentDictionary<string, int> _docVersions = new(StringComparer.Ordinal);          // monotonic didChange version per open doc
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _diagDebounce = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, int> _lastErrorSig = new(StringComparer.Ordinal);            // last errors-only signature published to non-openers, per uri
+    private readonly ConcurrentDictionary<string, string> _lastResultId = new(StringComparer.Ordinal);         // per-uri diagnostic resultId, replayed as previousResultId so the server can answer "unchanged"
     private long _nextGlobalId = 1; // 0 reserved for the daemon's own initialize
     private int _nextClientId = 0;
 
@@ -308,6 +309,7 @@ internal sealed class LspMultiplexer
                 if (_diagDebounce.TryRemove(uri, out var cts)) { try { cts.Cancel(); cts.Dispose(); } catch { } }
                 _docVersions.TryRemove(uri, out _);
                 _lastErrorSig.TryRemove(uri, out _);
+                _lastResultId.TryRemove(uri, out _);   // a reopened document must not present a token from its previous life
                 await _lsWriter.WriteJsonAsync(json.DeepClone()!, _ct).ConfigureAwait(false);
             }
             else _openDocs[uri] = after;
@@ -379,6 +381,11 @@ internal sealed class LspMultiplexer
             if (kind is "full" or "unchanged") break;           // a real report
             try { await Task.Delay(250, ct).ConfigureAwait(false); } catch { return; }
         }
+
+        // 2b. Remember the resultId the server just issued — BOTH report kinds carry one, and it is what lets the NEXT
+        // pull be answered "unchanged" instead of recomputed. Only ever a token the server gave us (see
+        // BuildDiagnosticParams); dropped on close so a reopened document never presents a stale token.
+        if (result?["resultId"]?.GetValue<string>() is { Length: > 0 } rid) _lastResultId[uri] = rid;
 
         // 3. A "full" report carries the current item set (empty = clear); "unchanged"/no-report → leave clients as-is.
         if (kind != "full") { _log($"diag[{(resyncFromDisk ? "edit" : "open/refresh")}] {uri} → no report (kind={kind}) — skip"); return; }
@@ -601,6 +608,24 @@ internal sealed class LspMultiplexer
     }
 
     /// <summary>One textDocument/diagnostic round-trip; returns the raw report result (null on error/timeout).</summary>
+    /// <summary>Diagnostic pull params, carrying <c>previousResultId</c> when we have one for this uri.
+    /// <para>THIS IS THE CHEAP-"unchanged" PATH AND IT IS HOW VISUAL STUDIO AVOIDS THIS COST. LSP pull diagnostics are
+    /// designed so the client hands back the resultId it last received; if nothing affecting that document changed, the
+    /// server replies <c>kind:"unchanged"</c> instead of recomputing and re-sending a full item set. Without the token the
+    /// server has no way to know what we already hold, so EVERY pull must be answered with a full report — and this daemon
+    /// pulls on every refresh, of every open document. MEASURED 2026-07-29: 199,484 pulls over 202 files (987 per file),
+    /// all necessarily full. The consumer side already understood "unchanged" (see PublishDiagnosticsForAsync); only the
+    /// request half was missing, so the capability was half-wired rather than absent.</para>
+    /// <para>SAFE BY CONSTRUCTION: a server that ignores previousResultId simply returns a full report — today's
+    /// behaviour. We only ever send a token the server itself gave us, and we drop it whenever a document closes.</para></summary>
+    private JsonObject BuildDiagnosticParams(string uri)
+    {
+        var td = new JsonObject { ["uri"] = uri };
+        var p = new JsonObject { ["textDocument"] = td };
+        if (_lastResultId.TryGetValue(uri, out string? prev) && !string.IsNullOrEmpty(prev)) p["previousResultId"] = prev;
+        return p;
+    }
+
     private async Task<JsonNode?> PullDiagnosticsOnceAsync(string uri, CancellationToken ct)
     {
         long pid = Interlocked.Increment(ref _nextGlobalId);
@@ -611,7 +636,7 @@ internal sealed class LspMultiplexer
             ["jsonrpc"] = "2.0",
             ["id"] = pid,
             ["method"] = "textDocument/diagnostic",
-            ["params"] = new JsonObject { ["textDocument"] = new JsonObject { ["uri"] = uri } },
+            ["params"] = BuildDiagnosticParams(uri),
         }, ct).ConfigureAwait(false);
         try { return await tcs.Task.WaitAsync(TimeSpan.FromSeconds(15), ct).ConfigureAwait(false); }
         catch { _internalPending.TryRemove(pid, out _); return null; }
