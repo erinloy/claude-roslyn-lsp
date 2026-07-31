@@ -72,6 +72,25 @@ if (-not (Test-Path $shadowDll)) {
 }
 if (-not (Test-Path $shadowDll)) { Log "shadow copy failed; falling back to bin (will lock $($p.dll))"; $shadowDll = $binDll }
 
+# ---- GC FOOTPRINT BOUND (Erin-directed 2026-07-31: "Microsoft.CodeAnalysis.LanguageServer is > 12GB RAM AGAIN") ----
+# MEASURED, not assumed: the shipped LanguageServer runtimeconfig.json sets `"System.GC.Server": true`, and this box
+# has 32 CORES. Server GC allocates ONE HEAP PER CORE, sizes each heap's budget for THROUGHPUT rather than footprint,
+# and does not return memory to the OS. In a SERVER that is correct. This is not a server — it is a long-lived
+# INTERACTIVE daemon on a SHARED developer box that is also running a live trading body and the webfrontend, driven
+# by five agents editing continuously. Measured: 12.61 GB private, 27,481 handles, ~3h uptime, grown from ~8.6 GB.
+#
+# These are set on the LAUNCHER so they are inherited by the daemon AND by the LanguageServer child it spawns —
+# one place, both processes, instead of patching a downloaded server's runtimeconfig that any update overwrites.
+#
+# GCConserveMemory (0-9) trades throughput for footprint and CANNOT cause an OOM — it makes the GC collect more
+# eagerly and release more, which is exactly the tradeoff an IDE-shaped daemon wants. Deliberately NOT a
+# GCHeapHardLimit: a hard cap on a workload whose true working set is unknown turns a memory problem into a
+# crash-loop, and the LSP is a shared dependency of every agent.
+# GCHeapCount caps the per-core heap proliferation that is the actual multiplier here (32 -> 8).
+# NOTE: .NET GC numeric env knobs are parsed as HEX; 8 is unambiguous, values above 9 would not be.
+if (-not $env:DOTNET_GCConserveMemory) { $env:DOTNET_GCConserveMemory = '7' }
+if (-not $env:DOTNET_GCHeapCount)      { $env:DOTNET_GCHeapCount      = '8' }
+
 # dotnet exec <shadowDll> <passthrough...>
 $execArgs = [System.Collections.Generic.List[string]]::new()
 $execArgs.Add('exec'); $execArgs.Add($shadowDll)
