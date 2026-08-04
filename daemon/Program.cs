@@ -197,6 +197,14 @@ sealed class IdleShutdown
             while (!_cts.IsCancellationRequested)
             {
                 await Task.Delay(TimeSpan.FromSeconds(30), _cts.Token).ConfigureAwait(false);
+
+                // Drive document eviction from this clock, NOT from the message path. The multiplexer's own sweep
+                // hook runs on didOpen, which is anti-correlated with the condition it tests: a busy fleet sweeps but
+                // nothing is idle yet, and a QUIET fleet — where every document is evictable — sends no didOpen and so
+                // never sweeps at all. This poll runs regardless of traffic. Failure is swallowed: reclamation must
+                // never take down the daemon, and the multiplexer already rate-limits to one pass per minute.
+                try { await _mux.SweepIdleDocsAsync().ConfigureAwait(false); } catch { }
+
                 if (_mux.ClientCount == 0 && _zeroSince != DateTime.MaxValue && DateTime.UtcNow - _zeroSince > _timeout)
                 {
                     _log($"idle for {_timeout.TotalSeconds:0}s with no clients — shutting down");

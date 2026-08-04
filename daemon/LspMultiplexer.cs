@@ -107,6 +107,15 @@ internal sealed class LspMultiplexer
 
     private void Touch(string uri) => _lastTouch[uri] = DateTime.UtcNow;
 
+    /// <summary>Drive the idle sweep from OUTSIDE the message path.
+    ///
+    /// <para>🔴 SWEEPING ONLY ON didOpen CANNOT FIRE WHEN IT MATTERS MOST. Documents become evictable precisely when
+    /// agents go QUIET — and a quiet fleet sends no didOpen, so the sweep never runs and the retention it exists to
+    /// reclaim sits there indefinitely. The trigger was anti-correlated with the condition: busy ⇒ sweeps but nothing
+    /// is idle yet; idle ⇒ everything is evictable and nothing sweeps. Called from IdleShutdown's existing 30s poll,
+    /// which runs regardless of traffic, so eviction now happens on a clock rather than on activity.</para></summary>
+    public Task SweepIdleDocsAsync() => MaybeEvictIdleDocsAsync();
+
     private async Task MaybeEvictIdleDocsAsync()
     {
         if (DocIdleMinutes <= 0) return;
