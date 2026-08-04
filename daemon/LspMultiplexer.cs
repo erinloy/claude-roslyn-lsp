@@ -68,6 +68,75 @@ internal sealed class LspMultiplexer
     }
 
     public int ClientCount => _clients.Count;
+
+    /// <summary>Open-document count as Roslyn currently sees it — the quantity that scales with connected agents.</summary>
+    public int OpenDocCount => _openDocs.Count;
+
+    // ---- idle-document eviction: the CURE for multi-agent retention ------------------------------------------------
+    // THE MECHANISM. didOpen/didClose are ref-counted and a close is forwarded only when the LAST client drops. LSP
+    // clients do not reliably send didClose for a file they merely READ, so the shared server accumulates the monotonic
+    // UNION of every document any agent ever opened. Each open document pins syntax trees, a semantic model, and —
+    // measured via gcdump 2026-08-03 — incremental SOURCE-GENERATOR state tables (IStateTable,
+    // SourceGeneratorSyntaxTreeInfo, TableEntry<(SemanticModel, TypeDeclarationSyntax)>) which are keyed BY SYNTAX TREE,
+    // per project, across a 345-project workspace. That is what took the server to 16.2 GB of LIVE gen-2 heap.
+    //
+    // WHY THIS IS LOSSLESS HERE, which is NOT true of eviction in a normal LSP host: this daemon NEVER FORWARDS THE
+    // CLIENT'S BUFFER. didChange/didSave do not reach the server as edits — the handler above re-syncs the server's view
+    // from DISK (resyncFromDisk: true), because disk is the single source of truth in a multi-agent fleet. So Roslyn's
+    // copy of a document is ALWAYS disk-derived, and closing one discards nothing the client owns. The normal hazard —
+    // evicting a dirty buffer and then applying an incremental change to stale text — cannot arise.
+    //
+    // RE-OPEN IS THE EXISTING PATH, not new code: any later didChange/didSave triggers resyncFromDisk, which already
+    // issues didClose+didOpen carrying the whole text. An evicted document simply costs one re-read on next touch.
+    // We close DIRECTLY to the server and leave _openDocs/_clients bookkeeping untouched, so client-facing protocol
+    // state is unchanged and a client's eventual real didClose still behaves (its uri is simply already gone).
+    //
+    // Swept on didOpen rather than a timer: no new background task, no lifecycle to get wrong, and the sweep is
+    // rate-limited so a burst of opens costs one pass. CLAUDE_ROSLYN_DOC_IDLE_MIN tunes it; 0 disables.
+    private readonly ConcurrentDictionary<string, DateTime> _lastTouch = new(StringComparer.Ordinal);
+    private DateTime _lastSweep = DateTime.UtcNow;
+    private static readonly int DocIdleMinutes = ReadIdleMinutes();
+
+    private static int ReadIdleMinutes()
+    {
+        var raw = Environment.GetEnvironmentVariable("CLAUDE_ROSLYN_DOC_IDLE_MIN");
+        // A malformed value falls back to the DEFAULT, never to 0/disabled: a typo must not silently remove the cure.
+        if (!string.IsNullOrWhiteSpace(raw) && int.TryParse(raw, out var m)) return m < 0 ? 0 : m;
+        return 20;
+    }
+
+    private void Touch(string uri) => _lastTouch[uri] = DateTime.UtcNow;
+
+    private async Task MaybeEvictIdleDocsAsync()
+    {
+        if (DocIdleMinutes <= 0) return;
+        if (DateTime.UtcNow - _lastSweep < TimeSpan.FromMinutes(1)) return; // rate-limit: one pass per minute at most
+        _lastSweep = DateTime.UtcNow;
+
+        var cutoff = DateTime.UtcNow - TimeSpan.FromMinutes(DocIdleMinutes);
+        var evicted = 0;
+        foreach (var uri in _openDocs.Keys)
+        {
+            // No recorded touch ⇒ opened before this build; treat as idle so pre-existing accumulation is reclaimed too.
+            if (_lastTouch.TryGetValue(uri, out var t) && t > cutoff) continue;
+            try
+            {
+                await _lsWriter.WriteJsonAsync(Notify("textDocument/didClose",
+                    new JsonObject { ["textDocument"] = new JsonObject { ["uri"] = uri } }), _ct).ConfigureAwait(false);
+                _openDocs.TryRemove(uri, out _);
+                _lastTouch.TryRemove(uri, out _);
+                _docVersions.TryRemove(uri, out _);
+                _lastErrorSig.TryRemove(uri, out _);
+                _lastResultId.TryRemove(uri, out _);   // a re-opened document must not present a token from its previous life
+                if (_diagDebounce.TryRemove(uri, out var cts)) { try { cts.Cancel(); cts.Dispose(); } catch { } }
+                evicted++;
+            }
+            catch { /* a reclamation pass must never take down the multiplexer */ }
+        }
+        if (evicted > 0)
+            _log($"evicted {evicted} document(s) idle >{DocIdleMinutes}m from the shared server ({_openDocs.Count} still open, " +
+                 $"{_clients.Count} client(s)) — re-opens from disk on next touch");
+    }
     public event Action? ClientCountChanged;
 
     /// <summary>Boot the single LS: pump its output, send initialize, capture caps, open the workspace.</summary>
@@ -245,14 +314,15 @@ internal sealed class LspMultiplexer
                 await HandleDocSyncAsync(method, json).ConfigureAwait(false);
                 // A freshly-opened doc gets an immediate pull (often empty until the server computes) — the real set
                 // arrives via the server's diagnostic/refresh. No disk resync: didOpen already carried the content.
-                if (method == "textDocument/didOpen" && DocUri(json) is { } ou) TriggerDiagnostics(ou, resyncFromDisk: false);
+                if (method == "textDocument/didOpen" && DocUri(json) is { } ou) { Touch(ou); TriggerDiagnostics(ou, resyncFromDisk: false); }
+                await MaybeEvictIdleDocsAsync().ConfigureAwait(false);
                 return;
 
             case "textDocument/didChange":
             case "textDocument/didSave":
                 // We don't forward the client's buffer (disk stays the single source of truth — multi-agent safe).
                 // Instead, re-sync the server's view from DISK and pull→publish diagnostics so edit feedback flows.
-                if (DocUri(json) is { } cu) TriggerDiagnostics(cu, resyncFromDisk: true);
+                if (DocUri(json) is { } cu) { Touch(cu); TriggerDiagnostics(cu, resyncFromDisk: true); }
                 return;
 
             default:
