@@ -99,7 +99,28 @@ foreach ($a in $Rest) { $execArgs.Add($a) }
 if ($Detached) {
     # Daemon: fire-and-forget. It talks to Roslyn over its own redirected stdio and to clients over shared memory, so it
     # needs no inherited console. Start hidden + detached and return immediately (no babysitter left behind).
-    Start-Process -FilePath 'dotnet' -ArgumentList $execArgs -WindowStyle Hidden | Out-Null
+    # 🔴 ITS STDOUT USED TO GO NOWHERE. Start-Process with no -RedirectStandardOutput DISCARDS it, so every _log()
+    # in the daemon — client connect/disconnect, idle shutdown, document eviction, memory-ceiling recycle — was
+    # written into a void. That made the daemon UNOBSERVABLE BY CONSTRUCTION: not merely under-instrumented, but
+    # incapable of reporting anything, so no change to it could ever be verified as working. That is the likely
+    # reason a long series of fixes here were each believed effective and none demonstrably were — a restart drops
+    # memory whether or not the fix runs, and with no log there was nothing else to look at.
+    #
+    # Append (not truncate) so a recycle's own message survives into the next process's file, and keep it per-project
+    # so daemon/client/mcp do not interleave. Cheap: these are low-rate lifecycle lines, not a trace.
+    $logRoot = Join-Path $env:LOCALAPPDATA 'claude-roslyn-lsp\logs'
+    New-Item -ItemType Directory -Force -Path $logRoot -ErrorAction SilentlyContinue | Out-Null
+    $outLog = Join-Path $logRoot "$Project.out.log"
+    $errLog = Join-Path $logRoot "$Project.err.log"
+    try {
+        Start-Process -FilePath 'dotnet' -ArgumentList $execArgs -WindowStyle Hidden `
+            -RedirectStandardOutput $outLog -RedirectStandardError $errLog | Out-Null
+    }
+    catch {
+        # Redirection can fail if a previous process still holds the file. Losing the log must never stop the daemon
+        # from starting — fall back to the original discard-stdout launch.
+        Start-Process -FilePath 'dotnet' -ArgumentList $execArgs -WindowStyle Hidden | Out-Null
+    }
     exit 0
 }
 
