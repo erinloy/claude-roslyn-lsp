@@ -1,3 +1,5 @@
+NOTICE: AI GENERATED SLOP. KNOWN TO WORK, BUT BARELY REVIEWED. TAKE APPROPRIATE PERCAUTIONS IN YOUR DOWNSTREAM AI GENERATED SLOP.
+
 # claude-roslyn-lsp
 
 Roslyn's language server — `Microsoft.CodeAnalysis.LanguageServer`, the engine behind the C# Dev Kit — packaged as a
