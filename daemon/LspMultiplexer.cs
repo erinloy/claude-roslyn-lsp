@@ -157,6 +157,10 @@ internal sealed class LspMultiplexer
         await _initResult.Task.ConfigureAwait(false); // wait for the server's initialize result (caps cached)
         await _lsWriter.WriteJsonAsync(Notify("initialized", new JsonObject()), _ct).ConfigureAwait(false);
         await OpenWorkspaceAsync(rootPath, solutionOverride).ConfigureAwait(false);
+        // ARMED AFTER the first open, deliberately: arming before it would race the initial load and could re-open a
+        // workspace that is still opening. The window between the two is one process start, and a project created in
+        // it is picked up by the first change after — not lost.
+        ArmProjectModelWatch(rootPath, solutionOverride);
         _log("LS initialized + workspace opened — daemon ready for clients");
     }
 
@@ -743,6 +747,127 @@ internal sealed class LspMultiplexer
             });
         await _lsWriter.WriteJsonAsync(notification, _ct).ConfigureAwait(false);
         _log(target.SolutionPath is not null ? $"solution/open → {target.SolutionPath}" : $"project/open → {target.ProjectPaths.Count}");
+    }
+
+    // ---- project-model watch --------------------------------------------------------------------------------------
+    //
+    // 🔴 THE PROJECT GRAPH WAS LOADED ONCE AND NEVER RELOADED, AND THE SERVER HAD NO WAY TO SAY SO.
+    //
+    // A language server has two staleness axes. FILE CONTENT is synced live — the client sends didOpen/didChange as an
+    // agent reads and edits, so text is timely. The PROJECT MODEL was loaded exactly once, by the single
+    // `OpenWorkspaceAsync` call in StartAsync. A new .csproj, a new ProjectReference, or a type MOVED between projects
+    // was therefore invisible to a running daemon FOREVER.
+    //
+    // 🩸 MEASURED 2026-08-31 on the Ziltch tree, which is what prompted this:
+    //     daemon started              08-30 20:04:00
+    //     Ziltch.Render.Shape.csproj  08-31 00:24:45      4h20m AFTER the daemon
+    //     `ShapeSpec` moved into that new project ⇒ every use reported CS0103 "does not exist in the current
+    //     context". `dotnet build` on the same tree: 0 errors.
+    // THREE AGENTS published a compile break from those diagnostics that night and all three retracted. The server was
+    // not wrong — it answered about the solution it had loaded, and nothing could tell it the solution had changed.
+    //
+    // ⚖️ WHY A RE-OPEN AND NOT `workspace/didChangeWatchedFiles`. The watched-files route needs the client to declare
+    // the capability AND honour every registration the server asks for; this daemon answers `registerCapability` with a
+    // null result (see the server→client request handling above), so declaring it would promise a watch nobody
+    // performs — a capability claimed and not honoured is worse than one absent, because the server then stops
+    // compensating. `solution/open` is Roslyn's OWN documented load path and is already the mechanism this file uses;
+    // re-sending it is the same instruction the daemon gives at startup, so there is no second code path to keep true.
+    //
+    // ⚠️ obj/ AND bin/ ARE EXCLUDED, and that exclusion is load-bearing rather than tidy: the SDK writes
+    // `<Project>.csproj.nuget.g.props` and copies project artefacts under obj/ DURING a build, so watching them would
+    // fire a reload on every compile — a reload storm triggered by the very builds the server exists to support.
+    private readonly List<FileSystemWatcher> _projectWatchers = new();
+    private readonly SemaphoreSlim _reloadGate = new(1, 1);
+    private Timer? _reloadDebounce;
+    private string? _watchRoot;
+    private string? _watchSolutionOverride;
+    private int _reloadCount;
+
+    /// <summary>Watch the workspace for PROJECT-MODEL changes and re-open the solution when one lands.</summary>
+    private void ArmProjectModelWatch(string rootPath, string? solutionOverride)
+    {
+        _watchRoot = rootPath;
+        _watchSolutionOverride = solutionOverride;
+
+        foreach (string pattern in new[] { "*.csproj", "*.sln", "*.slnx" })
+        {
+            try
+            {
+                var w = new FileSystemWatcher(rootPath, pattern)
+                {
+                    IncludeSubdirectories = true,
+                    NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.CreationTime,
+                };
+                w.Created += OnProjectFileEvent;
+                w.Changed += OnProjectFileEvent;
+                w.Deleted += OnProjectFileEvent;
+                w.Renamed += OnProjectFileEvent;
+                // 🛑 A DROPPED BUFFER MUST RELOAD, NOT BE IGNORED. FileSystemWatcher silently loses events when its
+                // internal buffer overflows (a branch switch, a bulk restore). "I missed some events" and "nothing
+                // happened" are the same silence, so the safe direction is to assume the model moved.
+                w.Error += (_, e) =>
+                {
+                    _log($"project-model watch: buffer error ({e.GetException().Message}) — reloading on the safe side");
+                    ScheduleReload();
+                };
+                w.EnableRaisingEvents = true;
+                _projectWatchers.Add(w);
+            }
+            catch (Exception ex)
+            {
+                // Not fatal: the daemon still serves, it just goes back to load-once behaviour. Say so LOUDLY rather
+                // than degrading quietly — a silent fallback here restores the exact defect this method removes.
+                _log($"project-model watch: FAILED to watch '{pattern}' under '{rootPath}' ({ex.Message}). " +
+                     "The project graph will NOT reload; structural diagnostics may go stale without warning.");
+            }
+        }
+
+        if (_projectWatchers.Count > 0)
+            _log($"project-model watch ARMED on {rootPath} ({_projectWatchers.Count} patterns) — solution/open re-sent on change");
+    }
+
+    private void OnProjectFileEvent(object sender, FileSystemEventArgs e)
+    {
+        string p = e.FullPath;
+        if (p.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase) ||
+            p.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
+            return;
+
+        ScheduleReload();
+    }
+
+    /// <summary>
+    /// Coalesce a burst into ONE reload. A solution edit, a `dotnet new`, or a branch switch writes several project
+    /// files in quick succession; reloading per event would re-read the whole graph N times and each read is the
+    /// expensive operation this daemon exists to amortise.
+    /// </summary>
+    private void ScheduleReload()
+    {
+        try
+        {
+            _reloadDebounce ??= new Timer(_ => _ = ReloadWorkspaceAsync(), null, Timeout.Infinite, Timeout.Infinite);
+            _reloadDebounce.Change(TimeSpan.FromSeconds(2), Timeout.InfiniteTimeSpan);
+        }
+        catch (ObjectDisposedException) { /* shutting down */ }
+    }
+
+    private async Task ReloadWorkspaceAsync()
+    {
+        if (_watchRoot is null) return;
+        if (!await _reloadGate.WaitAsync(0).ConfigureAwait(false)) return;   // a reload is already running; its re-read covers this change
+        try
+        {
+            int n = Interlocked.Increment(ref _reloadCount);
+            _log($"project-model changed — re-opening workspace (reload #{n})");
+            await OpenWorkspaceAsync(_watchRoot, _watchSolutionOverride).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // The daemon must survive a failed reload — a dead daemon is worse than a stale one, and the next change
+            // schedules another attempt. Reported rather than swallowed so a persistently failing reload is visible.
+            _log($"project-model reload FAILED: {ex.Message}. The graph may be stale until the next change.");
+        }
+        finally { _reloadGate.Release(); }
     }
 
     private static JsonObject BuildInitialize(string rootPath)
