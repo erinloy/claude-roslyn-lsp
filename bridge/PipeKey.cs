@@ -28,8 +28,10 @@ public static class PipeKey
     /// is deliberately right rather than outermost: a submodule or a worktree carries its own <c>.git</c> and SHOULD
     /// get its own daemon, because its source content differs.</para>
     ///
-    /// <para>🔑 Falls back to <paramref name="start"/> unchanged when nothing is found, so a directory of loose files
-    /// behaves exactly as it does today — this collapses same-repository splits and changes nothing else.</para>
+    /// <para>🔑 TOTAL BY DESIGN — the CONNECTING path must always have a root to hash. When nothing above is a
+    /// repository this answers the starting DIRECTORY (never the file path, which would key a daemon per file), so a
+    /// folder of loose files behaves exactly as it does today. Callers that ROUTE rather than connect want the
+    /// null instead: see <see cref="FindRepositoryRoot"/>.</para>
     /// </summary>
     public static string ResolveWorkspaceRoot(string start)
     {
