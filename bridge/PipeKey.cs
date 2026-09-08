@@ -9,6 +9,51 @@ namespace ClaudeRoslynLsp.Bridge;
 /// </summary>
 public static class PipeKey
 {
+    /// <summary>
+    /// The repository root that owns <paramref name="start"/> — the anchor a pipe key is derived from, so that every
+    /// session working in one repository lands on ONE daemon.
+    ///
+    /// <para>🩸 WITHOUT THIS, THE CWD *IS* THE WORKSPACE, AND THE PLUGIN'S OWN "one shared per-workspace server"
+    /// CONTRACT IS BROKEN BY ANY SESSION THAT STARTS IN A SUBDIRECTORY. Measured 2026-09-08 on the Ziltch tree — three
+    /// cwds inside a SINGLE repo, three different keys, therefore three full Roslyn daemons for one repository:</para>
+    /// <code>
+    /// Z:\SOURCE\Ziltch\___                      roslyn-lsp-51ee6c5eb9926e5c
+    /// Z:\SOURCE\Ziltch\___\src                  roslyn-lsp-d8c1550a6ee21943
+    /// Z:\SOURCE\Ziltch\___\src\Reactive.Graph   roslyn-lsp-b638dc695ac4a9fb
+    /// </code>
+    ///
+    /// <para>⚖️ <b>.git IS THE ANCHOR, AND A SOLUTION FILE IS NOT.</b> The same tree carries a <c>.slnx</c> at BOTH
+    /// <c>src</c> and <c>src\Reactive.Graph</c>, so a "nearest solution file" rule still splits those two. <c>.git</c>
+    /// is the repository boundary by git's own definition (what <c>rev-parse --show-toplevel</c> answers), and NEAREST
+    /// is deliberately right rather than outermost: a submodule or a worktree carries its own <c>.git</c> and SHOULD
+    /// get its own daemon, because its source content differs.</para>
+    ///
+    /// <para>🔑 Falls back to <paramref name="start"/> unchanged when nothing is found, so a directory of loose files
+    /// behaves exactly as it does today — this collapses same-repository splits and changes nothing else.</para>
+    /// </summary>
+    public static string ResolveWorkspaceRoot(string start)
+    {
+        string? solutionFallback = null;
+        try
+        {
+            var dir = new DirectoryInfo(File.Exists(start) ? Path.GetDirectoryName(start)! : start);
+            for (; dir is not null; dir = dir.Parent)
+            {
+                // A worktree/submodule carries .git as a FILE, a normal clone as a directory — either is the boundary.
+                string git = Path.Combine(dir.FullName, ".git");
+                if (Directory.Exists(git) || File.Exists(git)) return dir.FullName;
+
+                // Remembered, not returned: a .git further up outranks it, and only the OUTERMOST solution file seen
+                // on the way up is kept, so two sibling .slnx levels still agree on one root.
+                if (dir.EnumerateFiles("*.slnx").Any() || dir.EnumerateFiles("*.sln").Any())
+                    solutionFallback = dir.FullName;
+            }
+        }
+        catch { /* an unreadable ancestor must never stop the server from starting — fall through to the input */ }
+
+        return solutionFallback ?? start;
+    }
+
     /// <summary>Pipe name for a workspace root: stable, collision-resistant, filesystem/pipe-name safe.</summary>
     public static string ForRoot(string root)
     {

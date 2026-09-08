@@ -39,8 +39,13 @@ void Log(string m)
     try { File.AppendAllText(Path.Combine(launchLogDir, "client.log"), $"[{DateTime.Now:HH:mm:ss.fff}] {m}{Environment.NewLine}"); } catch { }
 }
 
-string root = Environment.GetEnvironmentVariable("CLAUDE_ROSLYN_WORKSPACE_ROOT")
-    ?? Directory.GetCurrentDirectory();
+// An explicit root is honoured verbatim — it is an operator's override and must not be second-guessed. Otherwise the
+// cwd is only a STARTING POINT: it is walked up to the repository that owns it, so two sessions in one repo but
+// different subdirectories share one daemon instead of paying for a full Roslyn instance each. See
+// PipeKey.ResolveWorkspaceRoot for the measurement that forced this.
+string? explicitRoot = Environment.GetEnvironmentVariable("CLAUDE_ROSLYN_WORKSPACE_ROOT");
+string cwd = Directory.GetCurrentDirectory();
+string root = explicitRoot is { Length: > 0 } ? explicitRoot : PipeKey.ResolveWorkspaceRoot(cwd);
 string endpoint = PipeKey.ForRoot(root);
 string? solution = Environment.GetEnvironmentVariable("CLAUDE_ROSLYN_SOLUTION");
 
@@ -48,7 +53,12 @@ string? solution = Environment.GetEnvironmentVariable("CLAUDE_ROSLYN_SOLUTION");
 string pluginRoot = Environment.GetEnvironmentVariable("CLAUDE_PLUGIN_ROOT")
     ?? Directory.GetParent(Path.GetDirectoryName(ScriptPath())!)!.FullName;
 
-Log($"workspace root: {root}");
+// Both are logged because a SHARED key is the whole point: when two sessions expect one daemon and get two, the first
+// question is which root each of them resolved, and a line carrying only the answer cannot say where it came from.
+Log($"workspace root: {root}"
+    + (explicitRoot is { Length: > 0 } ? "  (CLAUDE_ROSLYN_WORKSPACE_ROOT, verbatim)"
+       : root == cwd ? $"  (cwd, no .git/.slnx/.sln above it)"
+       : $"  (resolved up from cwd {cwd})"));
 Log($"endpoint: {endpoint}");
 
 IFrameChannel? channel = await DaemonConnector.ConnectAsync(endpoint, root, solution, pluginRoot, Log);
