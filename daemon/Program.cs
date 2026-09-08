@@ -69,7 +69,7 @@ static async Task RunDaemon(
             onReloaded: () => mux.RefreshDiagnostics(null), // re-publish open docs so the reloaded extension's state surfaces
             ct: cts.Token).ConfigureAwait(false);
 
-        var idle = new IdleShutdown(mux, TimeSpan.FromSeconds(idleSeconds), Log, cts);
+        var idle = new IdleShutdown(mux, TimeSpan.FromSeconds(idleSeconds), Log, cts, root);
         idle.Start();
 
         // Accept clients until cancelled or the LS dies.
@@ -185,8 +185,25 @@ sealed class IdleShutdown
         return max;
     }
 
-    public IdleShutdown(LspMultiplexer mux, TimeSpan timeout, Action<string> log, CancellationTokenSource cts)
-    { _mux = mux; _timeout = timeout; _log = log; _cts = cts; _mux.ClientCountChanged += () => { if (_mux.ClientCount > 0) _zeroSince = DateTime.MaxValue; else _zeroSince = DateTime.UtcNow; }; }
+    /// <summary>The workspace this daemon exists to serve. When it stops existing, so does the daemon — see the poll.</summary>
+    private readonly string _root;
+    private DateTime _rootGoneSince = DateTime.MaxValue;
+
+    /// <summary>How long the root must stay absent before this exits. THREE polls, not one: Z: here is a network
+    /// drive and a momentary unavailability must not recycle a healthy daemon serving a live workspace.</summary>
+    private static readonly TimeSpan RootGoneGrace = TimeSpan.FromSeconds(95);
+
+    /// <summary>Does the workspace still exist? An UNREADABLE root counts as PRESENT — a permissions blip or an
+    /// unmounted share must never be read as "deleted", because the failure direction there is killing a daemon that
+    /// is serving a live workspace. Only a clean, answered "no" starts the clock.</summary>
+    private bool RootExists()
+    {
+        try { return Directory.Exists(_root); }
+        catch { return true; }
+    }
+
+    public IdleShutdown(LspMultiplexer mux, TimeSpan timeout, Action<string> log, CancellationTokenSource cts, string root)
+    { _mux = mux; _timeout = timeout; _log = log; _cts = cts; _root = root; _mux.ClientCountChanged += () => { if (_mux.ClientCount > 0) _zeroSince = DateTime.MaxValue; else _zeroSince = DateTime.UtcNow; }; }
 
     public void Start() => _ = RunAsync();
 
@@ -208,6 +225,41 @@ sealed class IdleShutdown
                 if (_mux.ClientCount == 0 && _zeroSince != DateTime.MaxValue && DateTime.UtcNow - _zeroSince > _timeout)
                 {
                     _log($"idle for {_timeout.TotalSeconds:0}s with no clients — shutting down");
+                    _cts.Cancel();
+                    return;
+                }
+
+                // 🩸 A DAEMON WHOSE WORKSPACE NO LONGER EXISTS MUST NOT SURVIVE, AND THE IDLE CHECK ABOVE CANNOT
+                // REACH IT. Idle shutdown needs ClientCount to hit ZERO; a secondary daemon spawned for a transient
+                // directory (a probe worktree, a scratch checkout) keeps the client that touched it for the whole
+                // LIFETIME OF THAT SESSION, so the count never falls and the daemon outlives the directory by hours.
+                //
+                // MEASURED 2026-09-08: ten daemons live, 7.0 GB of Roslyn behind them (@testy), and FOUR were mine —
+                // two rooted at probe worktrees I had already deleted from git, two at directories I had merely
+                // edited files in. They had been running 100+ minutes past the point where there was anything to
+                // serve, and nothing in this class could ever have reaped them.
+                //
+                // ⚖️ IT IS ALSO WHY THOSE DIRECTORIES WOULD NOT DELETE. The Roslyn server holds file handles on what
+                // it indexed, so `git worktree remove` fails with "Permission denied" — which pushes the operator to
+                // `rm -rf`, and THAT bypasses git's own refusal to delete a worktree carrying uncommitted work. I lost
+                // uncommitted work in three worktrees that way the same hour. The leak does not merely waste memory;
+                // it disables a safety check by making the safe tool fail.
+                //
+                // 🔑 THE ROOT VANISHING IS UNAMBIGUOUS — there is nothing left to serve, whoever is still connected —
+                // so this exits regardless of client count. Clients watch the daemon PID and reconnect elsewhere, the
+                // same machinery the memory-ceiling recycle already relies on.
+                if (RootExists())
+                {
+                    _rootGoneSince = DateTime.MaxValue;
+                }
+                else if (_rootGoneSince == DateTime.MaxValue)
+                {
+                    _rootGoneSince = DateTime.UtcNow;
+                    _log($"workspace root is gone: {_root} — exiting in {RootGoneGrace.TotalSeconds:0}s unless it returns");
+                }
+                else if (DateTime.UtcNow - _rootGoneSince > RootGoneGrace)
+                {
+                    _log($"workspace root absent for {RootGoneGrace.TotalSeconds:0}s: {_root} — shutting down");
                     _cts.Cancel();
                     return;
                 }
