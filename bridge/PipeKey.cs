@@ -33,11 +33,36 @@ public static class PipeKey
     /// </summary>
     public static string ResolveWorkspaceRoot(string start)
     {
+        string floorDir = start;
+        try { floorDir = new DirectoryInfo(File.Exists(start) ? Path.GetDirectoryName(start)! : start).FullName; }
+        catch { /* keep the input */ }
+        return FindRepositoryRoot(start) ?? floorDir;
+    }
+
+    /// <summary>
+    /// The repository that owns <paramref name="start"/>, or <c>null</c> when NOTHING above it is a repository.
+    ///
+    /// <para>🔑 THE NULL IS THE POINT, and it is why this is separate from <see cref="ResolveWorkspaceRoot"/>. A file
+    /// with no marker above it has no workspace, and giving it one — its own folder — mints a daemon per FOLDER.
+    /// Measured 2026-09-08: editing two files in two subdirectories of one marker-less tree produced two daemons.
+    /// A caller that routes (rather than connects) wants to hear "there is no repository here" so it can leave the
+    /// file with the daemon it already has, which analyses it exactly as well: without a project, either daemon can
+    /// only do single-file analysis, so the second one buys nothing and costs a full Roslyn instance.</para>
+    /// </summary>
+    public static string? FindRepositoryRoot(string start)
+    {
         string? solutionFallback = null;
-        try
+        DirectoryInfo? dir;
+        try { dir = new DirectoryInfo(File.Exists(start) ? Path.GetDirectoryName(start)! : start); }
+        catch { return null; }
+
+        for (; dir is not null; dir = dir.Parent)
         {
-            var dir = new DirectoryInfo(File.Exists(start) ? Path.GetDirectoryName(start)! : start);
-            for (; dir is not null; dir = dir.Parent)
+            // ⚠️ PER DIRECTORY, NEVER AROUND THE LOOP. A single try around the whole walk means the FIRST unreadable
+            // or absent ancestor ends it, and the answer silently becomes "no repository" — which mints exactly the
+            // per-folder daemon this method exists to prevent. Caught here 2026-09-08 by a probe arm that walked a
+            // path which did not exist: it returned null for a file inside a real worktree.
+            try
             {
                 // A worktree/submodule carries .git as a FILE, a normal clone as a directory — either is the boundary.
                 string git = Path.Combine(dir.FullName, ".git");
@@ -48,10 +73,10 @@ public static class PipeKey
                 if (dir.EnumerateFiles("*.slnx").Any() || dir.EnumerateFiles("*.sln").Any())
                     solutionFallback = dir.FullName;
             }
+            catch { /* unreadable dir — keep walking; an ancestor may still be the repository */ }
         }
-        catch { /* an unreadable ancestor must never stop the server from starting — fall through to the input */ }
 
-        return solutionFallback ?? start;
+        return solutionFallback;
     }
 
     /// <summary>Pipe name for a workspace root: stable, collision-resistant, filesystem/pipe-name safe.</summary>

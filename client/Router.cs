@@ -353,21 +353,20 @@ internal sealed class DaemonRouter : IDisposable
         if (Normalize(full).StartsWith(_homeRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
             return null; // under the home root → the home daemon's solution covers it
 
-        // Walk up to the nearest workspace marker; that repo gets its own daemon.
-        DirectoryInfo? dir;
-        try { dir = new DirectoryInfo(Path.GetDirectoryName(full) ?? full); } catch { return null; }
-        for (; dir is not null; dir = dir.Parent)
-        {
-            try
-            {
-                if (Directory.Exists(Path.Combine(dir.FullName, ".git")) ||
-                    Directory.EnumerateFiles(dir.FullName, "*.sln").Any() ||
-                    Directory.EnumerateFiles(dir.FullName, "*.slnx").Any())
-                    return dir.FullName;
-            }
-            catch { /* unreadable dir — keep walking */ }
-        }
-        return Path.GetDirectoryName(full); // no marker found: treat the file's own folder as its root
+        // 🔑 ONE RULE, ONE PLACE. This walk used to live here as a SECOND implementation that disagreed with the
+        // client's: it tested `Directory.Exists(".git")`, so a WORKTREE — whose .git is a FILE — was invisible to it
+        // and the walk climbed straight past the worktree root. PipeKey is where the key is derived and therefore
+        // where the root must be decided; a routing key computed by different code than the connecting key is two
+        // answers to one question, which is exactly what the file's own summary promises cannot happen.
+        //
+        // 🩸 MEASURED 2026-09-08, self-inflicted and visible in the process table: editing two files in two
+        // subdirectories of ONE marker-less tree (the plugin's own cache) spawned TWO daemons, rooted at
+        // `.../0.1.1/bridge` and `.../0.1.1/client` — the old fallback below treated each file's own folder as a
+        // workspace, so the daemon count grew with the number of directories touched.
+        // NULL when nothing above the file is a repository — and null already means "the home daemon covers it" (see
+        // the home-root return above). That is the whole cure for the daemon-per-folder growth: a file with no project
+        // gets single-file analysis from ANY daemon, so the home one serves it and no second Roslyn is minted.
+        return PipeKey.FindRepositoryRoot(full);
     }
 
     private static string Normalize(string p) => p.Replace('/', '\\').TrimEnd('\\').ToLowerInvariant();
