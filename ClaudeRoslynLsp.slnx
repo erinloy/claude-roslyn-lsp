@@ -1,0 +1,46 @@
+<Solution>
+  <!--
+    Why this file exists, and it is NOT primarily about building.
+
+    `ensure-built.ps1` builds each csproj by explicit path and never reads a solution, so nothing in the build
+    needed this. What needs it is WORKSPACE ANCHORING.
+
+    PipeKey.FindRepositoryRoot walks up from a file looking for a `.git` marker, and falls back to the outermost
+    `.sln`/`.slnx` it passed. When nothing above a file is a repository it returns null, and ResolveWorkspaceRoot
+    then answers the STARTING DIRECTORY — so a marker-less tree mints one Roslyn daemon PER SUBDIRECTORY someone
+    opens a file in. That is documented on FindRepositoryRoot itself: "editing two files in two subdirectories of
+    one marker-less tree produced two daemons."
+
+    This repository is a git checkout, so it anchors fine. ITS INSTALLED COPY DOES NOT. Claude copies the plugin
+    into ~/.claude/plugins/cache/claude-roslyn-lsp/roslyn/<version>/, and a copy carries no `.git`. Measured
+    2026-09-09 across 84 daemon logs, three daemons had been minted inside that cache at SUBDIRECTORY roots:
+
+        ...\plugins\cache\claude-roslyn-lsp\roslyn\0.1.1\bridge
+        ...\plugins\cache\claude-roslyn-lsp\roslyn\0.1.1\client
+        ...\plugins\cache\claude-roslyn-lsp\roslyn\0.1.0\daemon
+
+    Three separate Roslyn instances to read one plugin's own source, because a browsed subdirectory of an
+    unmarked copy IS a workspace by that rule. A solution file at the plugin root ships WITH the copy, so the
+    cache anchors at <version>/ and the whole plugin is one workspace wherever it is installed.
+
+    The by-construction fix is a marker the existing rule already honours, not a new special case in PipeKey:
+    teaching the resolver about plugin manifests would add a second anchoring concept to maintain, and this uses
+    the one that is there. It also improves the checkout: the daemon logged "no solution found; opening 7
+    project(s)" for this repo and can now open one solution instead.
+
+    Keep every project listed. A project missing here is invisible to the workspace even though it builds.
+  -->
+  <Configurations>
+    <Platform Name="Any CPU" />
+    <Platform Name="x64" />
+  </Configurations>
+  <Project Path="bridge/ClaudeRoslynLsp.Bridge.csproj" />
+  <Project Path="cli/ClaudeRoslynLsp.Cli.csproj" />
+  <Project Path="client/ClaudeRoslynLsp.Client.csproj" />
+  <Project Path="daemon/ClaudeRoslynLsp.Daemon.csproj" />
+  <Project Path="extensions-api/ClaudeRoslynLsp.Extensions.Abstractions.csproj" />
+  <Project Path="mcp/ClaudeRoslynLsp.Mcp.csproj" />
+  <Folder Name="/samples/">
+    <Project Path="samples/SampleRunningSystemExtension/SampleRunningSystemExtension.csproj" />
+  </Folder>
+</Solution>
