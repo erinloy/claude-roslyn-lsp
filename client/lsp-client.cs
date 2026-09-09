@@ -55,9 +55,38 @@ string pluginRoot = Environment.GetEnvironmentVariable("CLAUDE_PLUGIN_ROOT")
 
 // Both are logged because a SHARED key is the whole point: when two sessions expect one daemon and get two, the first
 // question is which root each of them resolved, and a line carrying only the answer cannot say where it came from.
+// 🩸 root == cwd HAS TWO OPPOSITE CAUSES AND THIS LINE USED TO REPORT THEM IDENTICALLY. Either cwd IS an anchor
+// (healthy — the repository root is simply where you are), or the walk found nothing and fell back to cwd (a
+// rootless fragment, the 1.5 GB kind). Saying "no .git/.slnx/.sln above it" for the first is a falsehood about
+// the HEALTHIEST case, and this is the ONE line that tells a warm shared index from a fragment.
+// MEASURED LIVE 2026-09-09, found by @ziltch2, verbatim from client.log:
+//     workspace root: Z:\SOURCE\Ziltch\___  (cwd, no .git/.slnx/.sln above it)
+// That directory has a .git DIRECTORY. Four agents spent an evening distinguishing healthy roots from fragments
+// while the log line built to answer exactly that reported both the same way.
+// ⚖️ THE UNREADABLE CASE CLAIMS NOTHING, matching the daemon's own rule (Program.cs:196: an unreadable root
+// counts as PRESENT, because the failure direction is worse) — a permissions blip must not be printed as a
+// missing anchor.
+bool? cwdIsAnchor = null;
+if (root == cwd)
+{
+    try
+    {
+        cwdIsAnchor = Directory.Exists(Path.Combine(root, ".git")) || File.Exists(Path.Combine(root, ".git"))
+                      || Directory.GetFiles(root, "*.slnx").Length > 0
+                      || Directory.GetFiles(root, "*.sln").Length > 0;
+    }
+    catch { cwdIsAnchor = null; }
+}
+
 Log($"workspace root: {root}"
     + (explicitRoot is { Length: > 0 } ? "  (CLAUDE_ROSLYN_WORKSPACE_ROOT, verbatim)"
-       : root == cwd ? $"  (cwd, no .git/.slnx/.sln above it)"
+       : root == cwd
+           ? cwdIsAnchor switch
+             {
+                 true  => "  (cwd, and cwd IS the anchor — .git/.slnx/.sln is here)",
+                 false => "  (cwd — NO .git/.slnx/.sln anywhere above it: this root is a FRAGMENT)",
+                 _     => "  (cwd; anchor unreadable, claiming nothing)"
+             }
        : $"  (resolved up from cwd {cwd})"));
 Log($"endpoint: {endpoint}");
 
