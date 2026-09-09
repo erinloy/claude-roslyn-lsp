@@ -210,6 +210,37 @@ try {
                         "and its log could not be read, so nothing is claimed about what it loaded"
                     }
                 $mine = "YOUR server (the one THIS workspace's daemon owns, pid $($ls.ProcessId)): $mb MB committed, up $ageH h — $verdict."
+
+                # 🔴 "LANDED IS NOT RUNNING", AND THE SHADOW-COPY LAUNCHER MAKES THAT PERMANENT RATHER THAN BRIEF.
+                # run.ps1 copies bin to shadow\daemon\<stamp>\ and execs from THERE, so bin is never locked and a
+                # rebuild never disturbs a live daemon — the same property means a live daemon NEVER PICKS UP a
+                # rebuild. It keeps its shadow for its whole life. Measured 2026-09-09: three fixes sat correct, built,
+                # and in the right directory while all five daemons ran bits that predated them, and the question
+                # "is it deployed?" had a useless answer — the answer that matters is "did every live process start
+                # AFTER the build?". That was hand-measured three times in one night before it was worth automating.
+                #
+                # 🔑 THE COMPARISON IS run.ps1'S OWN, NOT AN IMITATION OF IT: the stamp is the newest file mtime in
+                # bin, Ticks in hex ("stamp the whole build by the NEWEST file mtime in bin — catches a
+                # dependency-only rebuild"), and the shadow directory IS that stamp. So recomputing it here and
+                # comparing against the directory the daemon is exec'ing from cannot drift from the launcher's rule
+                # unless the launcher's rule changes. Whole-file HASHING would be the wrong instrument twice over:
+                # slower, and blind to a dependency-only rebuild that this catches for free.
+                try {
+                    $pluginRoot = $Root
+                    if ([string]::IsNullOrWhiteSpace($pluginRoot)) { $pluginRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path }
+                    $binDir = Join-Path $pluginRoot 'daemon\bin\Release\net8.0'
+                    if ((Test-Path $binDir) -and ($daemon.CommandLine -match '([^\s"]*[\\/]shadow[\\/]daemon[\\/])([^\\/"]+)[\\/]')) {
+                        $runningStamp = $Matches[2]
+                        $newestBin = (Get-ChildItem $binDir -File -ErrorAction SilentlyContinue |
+                                      Measure-Object -Property LastWriteTimeUtc -Maximum).Maximum
+                        if ($newestBin) {
+                            $builtStamp = ('{0:x}' -f $newestBin.Ticks)
+                            if ($builtStamp -ne $runningStamp) {
+                                $mine += " ⚠️ IT IS RUNNING OLDER BITS THAN ARE BUILT (shadow $runningStamp, bin $builtStamp — built $($newestBin.ToLocalTime().ToString('MM-dd HH:mm'))). Nothing needs building or deploying; the shadow launcher hands new bits to the NEXT daemon start only, so this daemon keeps its own until it idles out and restarts. Do not reap it to hurry that along while it is serving sessions."
+                            }
+                        }
+                    }
+                } catch { }
             }
             else { $mine = 'YOUR daemon is running but has NOT started a language server yet — the first call starts it.' }
         }
