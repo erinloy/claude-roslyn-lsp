@@ -53,8 +53,27 @@ try {
         'no daemon held the endpoint yet, so one is starting for this workspace; it indexes in a few seconds.'
     }
 
+    # 🩸 "ONE SHARED DAEMON SERVES ALL AGENTS" WAS FALSE BY CONSTRUCTION, AND IT CAUSED A FLEET-WIDE MISDIAGNOSIS.
+    # @ziltch2 measured 2026-09-09: SIX Microsoft.CodeAnalysis.LanguageServer.exe, six DISTINCT parent MCP hosts.
+    # @mesh reproduced it — 7.65 GB of COMMIT across the six (ziltch2's 5.61 GB was working set; the meters differ
+    # by ~2x, which is its own trap). The servers are spawned `--stdio`, and A STDIO SERVER IS ONE PROCESS PER
+    # CLIENT CONNECTION: "shared daemon" and `--stdio` are mutually exclusive, so no wording could have made the old
+    # sentence true. The endpoint mutex this banner reads proves A process holds it, never that there is only one.
+    #
+    # ⚖️ AND IT RE-EXPLAINS THE TIMEOUTS. Two of the six had held 5 MB and 67 MB resident for FOURTEEN HOURS — they
+    # never loaded a workspace at all. A session attached to one of those does not have a slow server, it has an
+    # EMPTY one, and it times out on every call forever while a sibling on the warm 4.6 GB server is served
+    # instantly. The earlier reading (including mine) was "same daemon, so the fault is client-side" — same symptom,
+    # opposite cause, and "just retry" cannot fix the cold-server case because the retry reconnects to the same host.
+    $servers = @(Get-CimInstance Win32_Process -Filter "Name='Microsoft.CodeAnalysis.LanguageServer.exe'" -ErrorAction SilentlyContinue)
+    $serverLine = if ($servers.Count -gt 0) {
+        $gb = 0.0
+        foreach ($s in $servers) { $p = Get-Process -Id $s.ProcessId -ErrorAction SilentlyContinue; if ($p) { $gb += $p.PrivateMemorySize64 / 1GB } }
+        "{0} language server(s) alive on this box, {1:N1} GB committed between them — ONE PER MCP HOST (they are --stdio), not one shared." -f $servers.Count, $gb
+    } else { 'no language server process is running yet; yours starts with your first call.' }
+
     $banner = @"
-[Roslyn LSP READY] C# language server is solution-wide and self-warming — one shared daemon serves all agents, no per-session workspace load. $state
+[Roslyn LSP] C# language server, solution-wide and self-warming. $serverLine $state
 
 PREFER the LSP over grep for any symbol / reference / type question — it is semantic (no string false-positives) and solution-wide:
 - workspaceSymbol  — find a type or member by name across the WHOLE solution (the thing to reach for instead of grepping for a definition)
@@ -66,7 +85,8 @@ PREFER the LSP over grep for any symbol / reference / type question — it is se
 FIRST-CALL COLD EDGE: in a brand-new session the very first call can return "server is starting / has not finished indexing" — retry once, it warms in seconds; do not conclude the LSP is unreliable. A "no symbols found" result is a true empty answer only once indexed — if unsure, query a symbol you know exists to confirm the index is live before trusting a negative.
 
 IF YOUR CALLS TIME OUT, IT IS PROBABLY YOUR CLIENT, NOT THE DAEMON — measured 2026-09-09, four agents, one daemon: two sessions had every call time out at 120s while two others were served normally by that same daemon. The known fault is per-session ("client N read loop ended (NullReferenceException)" strands one client; the server keeps serving everyone else), so:
-- FIRST, JUST RETRY THE CALL. A timed-out call now drops its cached connection, so the NEXT call reconnects (and restarts the daemon if it actually died). Before 2026-09-09 it did not: the host's timeout fired before the client's own ceiling, the drop was skipped, and one wedged link poisoned every later call for the whole session. If you are on older bits, a retry will not help and there is no in-session cure — MCP servers attach at SESSION START, so the connection cannot be reopened; use grep and say so.
+- THERE ARE TWO DIFFERENT CAUSES AND THE CURES ARE OPPOSITE. (a) A WEDGED CLIENT: a timed-out call now drops its cached connection, so the NEXT call reconnects — just retry. Before 2026-09-09 it did not (the host's timeout fired before the client's own ceiling, the drop was skipped, one wedged link poisoned the session), and on older bits there is no in-session cure because MCP attaches at SESSION START. (b) A COLD SERVER: your MCP host has its OWN server, and if that one never loaded the workspace it will time out on EVERY call, forever, while other sessions are served instantly by theirs. Retrying reconnects you to the SAME host and therefore the same cold server — it cannot help. Measured 2026-09-09: two of six servers had held 5 MB and 67 MB resident for fourteen hours, i.e. had never loaded anything.
+- TO TELL THEM APART: ask whether ANOTHER session is being served (it will be — theirs is a different server, which proves nothing about yours), then look at YOUR host's server. A warm one on this solution is GBs; a cold one is tens of MB. If yours is the cold one, a new session is the only cure and grep is the honest fallback until then.
 - It is NOT reaping the daemon. Reaping discards a multi-GB warm index that is serving other sessions.
 - DO NOT diagnose the daemon by CPU. It is request/response, so 0% between requests is its CORRECT state — "flat CPU while elapsed climbs = wedged" is a rule for work that should be CONTINUOUS (a replay, a build, a boot) and it inverts here. An idle server and a wedged one look identical; only sending a request tells them apart.
 - Before concluding anything about the daemon, ask whether ANOTHER session is being served. If yes, the daemon is fine and the fault is yours to reset.
