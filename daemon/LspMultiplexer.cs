@@ -39,6 +39,12 @@ internal sealed class LspMultiplexer
     private readonly ConcurrentDictionary<string, string> _lastResultId = new(StringComparer.Ordinal);         // per-uri diagnostic resultId, replayed as previousResultId so the server can answer "unchanged"
     private long _nextGlobalId = 1; // 0 reserved for the daemon's own initialize
     private int _nextClientId = 0;
+    /// <summary>Diagnostic pulls that came back "unchanged"/no-report, i.e. the resultId cache did its job and there was
+    /// nothing to send. The dominant outcome by far, so it is COUNTED and reported periodically rather than narrated per
+    /// file: these two counters were 98.8% of a 1.06 GB log before that changed.</summary>
+    private int _diagNoReport;
+    /// <summary>Publishes whose errors-only projection matched the last one, so nothing was broadcast to non-openers.</summary>
+    private int _diagUnchanged;
 
     // Accessors (not fixed lists) so a hot-reload of an extension takes effect on the next request — the daemon reads the
     // CURRENT instances from the reloadable host each time, never a cached snapshot.
@@ -471,7 +477,29 @@ internal sealed class LspMultiplexer
         if (result?["resultId"]?.GetValue<string>() is { Length: > 0 } rid) _lastResultId[uri] = rid;
 
         // 3. A "full" report carries the current item set (empty = clear); "unchanged"/no-report → leave clients as-is.
-        if (kind != "full") { _log($"diag[{(resyncFromDisk ? "edit" : "open/refresh")}] {uri} → no report (kind={kind}) — skip"); return; }
+        //
+        // 🩸 THIS LINE, AND ITS SIBLING IN PublishRoutedAsync, WROTE 98.8% OF A 1.06 GB LOG. Measured 2026-09-09 on the
+        // canonical Ziltch daemon: 6,769,113 of 6,869,435 lines were diag chatter, and the 61,055 buffer-error and
+        // 9,998 reload lines that actually explained the daemon's behaviour sat at ONE SIGNAL LINE PER 69. Five agents
+        // reconstructed that behaviour from a process table while this file held it.
+        //
+        // ⚖️ AND THE DOMINANT CASE IS A NO-OP. "unchanged" is the SUCCESS path of the resultId protocol two comments
+        // above — it means the cache worked and there is nothing to send. Narrating the expected outcome per file per
+        // refresh is how a log stops being readable: 677 lines per reload, and a reload is not rare on a tree ~25
+        // agents build into. A rotation cap bounds such a file; it does not make it worth reading.
+        //
+        // 🔑 SO COUNT IT AND SAY IT PERIODICALLY, the same idiom as _overflowQuiet below: the FACT that a daemon is
+        // doing thousands of no-op refreshes is real signal and must survive, but it is one line of signal, not
+        // 6.77 million. First one always speaks, then every thousandth, and each carries the running total plus the
+        // file that triggered it so a reader still has a concrete example to chase.
+        if (kind != "full")
+        {
+            int skipped = Interlocked.Increment(ref _diagNoReport);
+            if (skipped == 1 || skipped % 1000 == 0)
+                _log($"diag[{(resyncFromDisk ? "edit" : "open/refresh")}] no report (kind={kind}) — skip #{skipped} "
+                   + $"(latest {uri}; these are the resultId cache working, not a fault)");
+            return;
+        }
         JsonArray items = (result!["items"] as JsonArray)?.DeepClone()?.AsArray() ?? new JsonArray();
         await AugmentWithExtensionsAsync(uri, items, ct).ConfigureAwait(false);
         await PublishRoutedAsync(uri, items, resyncFromDisk).ConfigureAwait(false);
@@ -661,8 +689,31 @@ internal sealed class LspMultiplexer
             if (d?["severity"]?.GetValue<int>() == 1) errors.Add(d.DeepClone());
         int sig = ErrorSignature(errors);
         bool changed = !_lastErrorSig.TryGetValue(uri, out int prev) || prev != sig;
-        _log($"diag[{(fromEdit ? "edit" : "open/refresh")}] {uri} → {items.Count} item(s) ({openers} opener(s), {errors.Count} error(s){(changed ? ", errors-changed" : "")})");
-        if (!changed) return;          // surrounding-area error set is the same — don't re-broadcast to non-openers
+
+        // 🩸 THE OTHER 98.8% WRITER, AND IT LOGGED THE DECISION IT WAS ABOUT TO SKIP. This line ran BEFORE the
+        // `if (!changed) return` below, so the case the code deliberately declines to act on — the error set is
+        // identical to last time, nothing is broadcast — still cost a line every refresh of every open document.
+        // The comment one line up already states the intent ("no per-refresh re-spam"); the log did exactly the
+        // re-spam the broadcast avoids.
+        //
+        // ⚖️ SO THE RULE IS: A LINE WHEN SOMETHING HAPPENED. A changed error set is an event worth one line each
+        // time — that is the daemon telling clients something new, and it is rare. An unchanged one is the steady
+        // state, counted and reported at 1-then-every-1000 like the other quiet paths in this file, so "this
+        // daemon refreshed 6.7 M times without a single error-set change" stays visible as ONE fact instead of
+        // becoming the log.
+        if (changed)
+        {
+            _log($"diag[{(fromEdit ? "edit" : "open/refresh")}] {uri} → {items.Count} item(s) "
+               + $"({openers} opener(s), {errors.Count} error(s), errors-changed)");
+        }
+        else
+        {
+            int quiet = Interlocked.Increment(ref _diagUnchanged);
+            if (quiet == 1 || quiet % 1000 == 0)
+                _log($"diag[{(fromEdit ? "edit" : "open/refresh")}] error set UNCHANGED — no broadcast #{quiet} "
+                   + $"(latest {uri}: {items.Count} item(s), {openers} opener(s), {errors.Count} error(s))");
+            return;                    // surrounding-area error set is the same — don't re-broadcast to non-openers
+        }
         _lastErrorSig[uri] = sig;
         if (errors.Count == 0 && prev == 0) return; // never had errors and still none → nothing to clear
 
