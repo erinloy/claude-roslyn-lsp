@@ -60,11 +60,16 @@ try {
     # CLIENT CONNECTION: "shared daemon" and `--stdio` are mutually exclusive, so no wording could have made the old
     # sentence true. The endpoint mutex this banner reads proves A process holds it, never that there is only one.
     #
-    # ⚖️ AND IT RE-EXPLAINS THE TIMEOUTS. Two of the six had held 5 MB and 67 MB resident for FOURTEEN HOURS — they
-    # never loaded a workspace at all. A session attached to one of those does not have a slow server, it has an
-    # EMPTY one, and it times out on every call forever while a sibling on the warm 4.6 GB server is served
-    # instantly. The earlier reading (including mine) was "same daemon, so the fault is client-side" — same symptom,
-    # opposite cause, and "just retry" cannot fix the cold-server case because the retry reconnects to the same host.
+    # ❌ AND THE PART OF THAT READING THAT SAID "TWO OF THEM NEVER LOADED A WORKSPACE" WAS WRONG — WITHDRAWN
+    # 2026-09-09 after checking each daemon's own startup log instead of inferring from its size:
+    #     124952  C:\SOURCE\scratch\___\echo          "no solution found; opening 64 project(s)"   LOADED
+    #      81064  Z:\SOURCE\Ziltch\claude-roslyn-lsp  "no solution found; opening 7 project(s)"    LOADED
+    #      77440  ...\Temp\claude\leafcodec-save      "no workspace target — solution/open skipped"
+    # 361 MB is 64 real projects and 204 MB is 7. They are small because their workspaces are small, not because
+    # nothing happened. Only 77440 opened nothing, and that is CORRECT for a root with no project file: without a
+    # project Roslyn can only do single-file analysis, so ~100 MB is the right cost of that job. The cold-server
+    # population on this box was ZERO, and the claim existed because three of us read a small number as a broken
+    # one. That is why the line the banner now prints quotes the daemon's own words and carries no size threshold.
     # ONE CIM QUERY FOR ALL THREE QUESTIONS. Each Win32_Process query costs ~1.7 s on this box (measured), and this
     # runs on the SessionStart path, so three separate ones put five seconds in front of every agent's first prompt.
     # The combined filter returns 36 rows and every derivation below is then in-memory.
@@ -225,7 +230,7 @@ PREFER the LSP over grep for any symbol / reference / type question — it is se
 FIRST-CALL COLD EDGE: in a brand-new session the very first call can return "server is starting / has not finished indexing" — retry once, it warms in seconds; do not conclude the LSP is unreliable. A "no symbols found" result is a true empty answer only once indexed — if unsure, query a symbol you know exists to confirm the index is live before trusting a negative.
 
 IF YOUR CALLS TIME OUT, IT IS PROBABLY YOUR CLIENT, NOT THE DAEMON — measured 2026-09-09, four agents, one daemon: two sessions had every call time out at 120s while two others were served normally by that same daemon. The known fault is per-session ("client N read loop ended (NullReferenceException)" strands one client; the server keeps serving everyone else), so:
-- THERE ARE TWO DIFFERENT CAUSES AND THE CURES ARE OPPOSITE. (a) A WEDGED CLIENT: a timed-out call now drops its cached connection, so the NEXT call reconnects — just retry. Before 2026-09-09 it did not (the host's timeout fired before the client's own ceiling, the drop was skipped, one wedged link poisoned the session), and on older bits there is no in-session cure because MCP attaches at SESSION START. (b) A COLD SERVER: your MCP host has its OWN server, and if that one never loaded the workspace it will time out on EVERY call, forever, while other sessions are served instantly by theirs. Retrying reconnects you to the SAME host and therefore the same cold server — it cannot help. Measured 2026-09-09: two of six servers had held 5 MB and 67 MB resident for fourteen hours, i.e. had never loaded anything.
+- THERE ARE TWO DIFFERENT CAUSES AND THE CURES ARE OPPOSITE. (a) A WEDGED CLIENT: a timed-out call now drops its cached connection, so the NEXT call reconnects — just retry. Before 2026-09-09 it did not (the host's timeout fired before the client's own ceiling, the drop was skipped, one wedged link poisoned the session), and on older bits there is no in-session cure because MCP attaches at SESSION START. (b) A COLD SERVER: your MCP host has its OWN server, and if that one never loaded the workspace it would time out on EVERY call, forever. Retrying reconnects you to the SAME host and therefore the same cold server, so it cannot help. ⚠️ BUT DO NOT REACH FOR (b) FIRST: the line at the top of this banner has already checked, and when this was measured properly on 2026-09-09 the cold-server population was ZERO — the "two servers that never loaded anything" reading was three agents mistaking a SMALL workspace for an unloaded one (361 MB was 64 projects; 204 MB was 7). (a) is the cause that has actually been observed.
 - TO TELL THEM APART: THE LINE AT THE TOP OF THIS BANNER ALREADY DID IT. It names your workspace's own server by pid, its committed memory, its age, and whether its daemon log shows a solution/open. Do not re-derive that from the process table, and do NOT judge by size alone — a daemon serving a folder of loose .cs files with no project correctly holds ~100 MB forever, because without a project Roslyn can only do single-file analysis. "Small" is not the symptom; "small while a solution was opened" is. If yours is the cold one, a new session is the only cure and grep with its scope stated is the honest fallback until then.
 - It is NOT reaping the daemon. Reaping discards a multi-GB warm index that is serving other sessions.
 - DO NOT diagnose the daemon by CPU. It is request/response, so 0% between requests is its CORRECT state — "flat CPU while elapsed climbs = wedged" is a rule for work that should be CONTINUOUS (a replay, a build, a boot) and it inverts here. An idle server and a wedged one look identical; only sending a request tells them apart.
