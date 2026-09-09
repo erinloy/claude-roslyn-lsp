@@ -802,14 +802,35 @@ internal sealed class LspMultiplexer
                 w.Changed += OnProjectFileEvent;
                 w.Deleted += OnProjectFileEvent;
                 w.Renamed += OnProjectFileEvent;
-                // 🛑 A DROPPED BUFFER MUST RELOAD, NOT BE IGNORED. FileSystemWatcher silently loses events when its
-                // internal buffer overflows (a branch switch, a bulk restore). "I missed some events" and "nothing
-                // happened" are the same silence, so the safe direction is to assume the model moved.
+                // 🩸 A DROPPED BUFFER MUST NOT BE IGNORED — AND MUST NOT RELOAD BLINDLY EITHER. This used to call
+                // ScheduleReload() unconditionally, and that is the one path the obj/bin exclusion above cannot reach:
+                // the filter lives in OnProjectFileEvent, the overflow never goes through it, so build churn under
+                // bin/ and obj/ FILLED THE OS BUFFER and every overflow re-opened a 357-project solution. The comment
+                // above says that exclusion exists to prevent "a reload storm triggered by the very builds the server
+                // exists to support" — and the storm arrived anyway, through the door the filter does not cover.
+                //
+                // 📏 MEASURED 2026-09-09 on the canonical Ziltch daemon (@blackmagic found it, @mesh confirmed on an
+                // independent 40 MB tail of the 1.14 GB log):
+                //     "Too many changes at once"   61,029   — 24% of every line in the sample
+                //     "solution/open"              10,020   — the 357-project graph, re-opened, in one window
+                // Four agents spent an evening diagnosing the resulting latency as a wedged daemon.
+                //
+                // ⚖️ SO THE SAFE DIRECTION IS PRESERVED BY LOOKING, NOT BY ASSUMING. "I missed some events" and
+                // "nothing happened" are still the same silence — so on overflow we go and READ the project-file set
+                // instead of trusting it. A re-scan cannot miss a real change (it observes current truth, not events)
+                // and cannot storm on churn it excludes. That is CANON's ranking: by construction over machinery.
                 w.Error += (_, e) =>
                 {
-                    _log($"project-model watch: buffer error ({e.GetException().Message}) — reloading on the safe side");
-                    ScheduleReload();
+                    // OFF THE WATCHER'S CALLBACK THREAD. The re-scan walks the tree (~40 s measured here), and doing
+                    // that inline would block the very thread that delivers change events — starving the watcher
+                    // during exactly the window it is already losing events in, and deepening the overflow it is
+                    // reacting to. The latch inside makes the pile-up harmless.
+                    _log($"project-model watch: buffer error ({e.GetException().Message}) — re-scanning the project set");
+                    _ = Task.Run(OnWatchOverflow);
                 };
+                // Machinery, secondary and stated as such: a bigger buffer makes overflow RARER, never impossible, so
+                // it is not the fix — the re-scan above is. 64 KiB is the documented maximum.
+                w.InternalBufferSize = 64 * 1024;
                 w.EnableRaisingEvents = true;
                 _projectWatchers.Add(w);
             }
@@ -822,8 +843,144 @@ internal sealed class LspMultiplexer
             }
         }
 
+        // SEED THE COMPARISON SUBJECT. Without this the first overflow compares against an EMPTY set, finds a
+        // difference of N, and reloads — which would reproduce the storm for exactly one cycle per daemon and, worse,
+        // would make the re-scan look like it does not work.
         if (_projectWatchers.Count > 0)
-            _log($"project-model watch ARMED on {rootPath} ({_projectWatchers.Count} patterns) — solution/open re-sent on change");
+            _log($"project-model watch ARMED on {rootPath} ({_projectWatchers.Count} patterns) "
+               + "— solution/open re-sent on a REAL change; a buffer overflow re-scans instead of assuming");
+
+        // OFF THE STARTUP PATH, for the same reason the overflow scan is off the callback thread: this walk takes
+        // SECONDS on a tree this size, and the daemon's whole purpose is that the first call of every agent session is
+        // fast. Until the seed lands the known set is empty, so an overflow arriving in that window finds a mismatch
+        // and reloads — which is precisely the OLD behaviour, i.e. the failure mode of an unseeded start is "no better
+        // than before", never "worse".
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                var seed = SnapshotProjectFiles(rootPath);
+                lock (_knownLock) _knownProjectFiles = seed;
+                _log($"project-model watch: baseline captured — {seed.Count} project files under {rootPath} "
+                   + "(bin/obj/.git/node_modules excluded). Overflows now compare instead of assuming.");
+            }
+            catch (Exception ex)
+            {
+                _log($"project-model watch: could not seed the project-file set ({ex.Message}). Overflows will reload "
+                   + "unconditionally, as they did before the re-scan landed.");
+            }
+        });
+    }
+
+    /// <summary>The project-file set as last loaded: path → last-write UTC. The subject a buffer overflow asks about,
+    /// so an overflow can be answered by COMPARISON instead of by assumption.</summary>
+    private Dictionary<string, DateTime> _knownProjectFiles = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _knownLock = new();
+    private int _overflowQuiet;
+    /// <summary>Single-flight latch for the overflow re-scan. 0 = idle, 1 = a walk is in progress. Overflows arriving
+    /// during a walk are DROPPED rather than queued: they ask the identical question ("did the project set move?") and
+    /// the in-flight walk observes current truth, so it already answers the ones that land while it runs.</summary>
+    private int _overflowScanBusy;
+
+    /// <summary>
+    /// 🔑 <b>WHAT A BUFFER OVERFLOW ACTUALLY MEANS: "I stopped being able to tell you." Not "something changed".</b>
+    /// So this goes and looks, and reloads only if the project-file set really moved.
+    ///
+    /// <para>The safety property is UNCHANGED and is why a re-scan is the right shape rather than a suppression: a
+    /// scan reads CURRENT TRUTH, not a stream of events, so it cannot miss a change that happened during the blind
+    /// window — which is exactly what the old blind reload was protecting against. It simply declines to reload when
+    /// nothing moved.</para>
+    ///
+    /// <para>⚠️ ANY FAILURE RELOADS. If the scan throws — a permission fault, a directory vanishing mid-walk — we are
+    /// back to "I cannot tell", and the safe direction is the original one. A cheaper wrong answer is not the trade.</para>
+    /// </summary>
+    private void OnWatchOverflow()
+    {
+        if (_watchRoot is null) { ScheduleReload(); return; }
+
+        // 🩸 THE SCAN IS NOT CHEAP AND MY FIRST VERSION RAN IT PER OVERFLOW, WHICH WAS WORSE THAN THE BUG.
+        // Measured on this tree 2026-09-09 BEFORE shipping it: 5,452 project files, and a full walk that takes SECONDS
+        // (~40 s through an equivalent PowerShell walk; the C# one below is faster, but it is the same order and it is
+        // emphatically not free — the number that matters is "seconds", not the exact figure) — and
+        // overflows arrive in the tens of thousands (61,029 in one 40 MB log sample). Per-overflow scanning would have
+        // replaced a 357-project reload with something an order of magnitude worse, on the hotter path. The re-scan is
+        // only correct BECAUSE it is single-flighted and debounced: an overflow storm collapses to ONE walk, and a
+        // walk already in progress absorbs every overflow that lands during it (they ask the same question, and it is
+        // already being answered).
+        if (Interlocked.CompareExchange(ref _overflowScanBusy, 1, 0) != 0) return;
+
+        Dictionary<string, DateTime> now;
+        try { now = SnapshotProjectFiles(_watchRoot); }
+        catch (Exception ex)
+        {
+            _log($"project-model watch: overflow re-scan FAILED ({ex.Message}) — reloading on the safe side");
+            ScheduleReload();
+            return;
+        }
+        finally { Interlocked.Exchange(ref _overflowScanBusy, 0); }
+
+        bool changed;
+        lock (_knownLock)
+        {
+            changed = _knownProjectFiles.Count != now.Count
+                   || now.Any(kv => !_knownProjectFiles.TryGetValue(kv.Key, out var was) || was != kv.Value);
+            if (changed) _knownProjectFiles = now;
+        }
+
+        if (!changed)
+        {
+            // Counted, not silent: if this number climbs while nothing reloads, the watcher is being drowned by churn
+            // it correctly ignores — which is a fact about the BOX (20 agents building into one tree), not a fault here.
+            int q = Interlocked.Increment(ref _overflowQuiet);
+            if (q == 1 || q % 100 == 0)
+                _log($"project-model watch: overflow #{q} carried NO project-file change — not reloading "
+                   + $"({now.Count} project files unchanged). Build churn under bin/obj fills the buffer; the model did not move.");
+            return;
+        }
+
+        _log("project-model watch: overflow carried a REAL project-file change — reloading");
+        ScheduleReload();
+    }
+
+    /// <summary>Every project file under <paramref name="root"/>, skipping the directories whose churn caused the
+    /// overflow in the first place. Walked manually rather than with AllDirectories: enumerating bin/ and obj/ only to
+    /// discard them is the same wasted work, and on this tree they hold far more files than the source does.</summary>
+    private static Dictionary<string, DateTime> SnapshotProjectFiles(string root)
+    {
+        var map = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+        var stack = new Stack<string>();
+        stack.Push(root);
+
+        while (stack.Count > 0)
+        {
+            string dir = stack.Pop();
+            try
+            {
+                foreach (string f in Directory.EnumerateFiles(dir))
+                {
+                    string ext = Path.GetExtension(f);
+                    if (ext.Equals(".csproj", StringComparison.OrdinalIgnoreCase)
+                        || ext.Equals(".sln", StringComparison.OrdinalIgnoreCase)
+                        || ext.Equals(".slnx", StringComparison.OrdinalIgnoreCase))
+                        map[f] = File.GetLastWriteTimeUtc(f);
+                }
+
+                foreach (string d in Directory.EnumerateDirectories(dir))
+                {
+                    string name = Path.GetFileName(d);
+                    if (name.Equals("bin", StringComparison.OrdinalIgnoreCase)
+                        || name.Equals("obj", StringComparison.OrdinalIgnoreCase)
+                        || name.Equals(".git", StringComparison.OrdinalIgnoreCase)
+                        || name.Equals("node_modules", StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    stack.Push(d);
+                }
+            }
+            catch (UnauthorizedAccessException) { /* one unreadable directory is not the whole answer — keep walking */ }
+            catch (DirectoryNotFoundException) { /* raced with a delete; the next overflow re-reads */ }
+        }
+
+        return map;
     }
 
     private void OnProjectFileEvent(object sender, FileSystemEventArgs e)
@@ -860,6 +1017,15 @@ internal sealed class LspMultiplexer
             int n = Interlocked.Increment(ref _reloadCount);
             _log($"project-model changed — re-opening workspace (reload #{n})");
             await OpenWorkspaceAsync(_watchRoot, _watchSolutionOverride).ConfigureAwait(false);
+            // RE-BASELINE AFTER THE LOAD, not before it: the set this daemon is now serving is the one a later
+            // overflow must be compared against. Taking it before the re-open would compare the next overflow against
+            // a graph we never loaded.
+            try
+            {
+                var after = SnapshotProjectFiles(_watchRoot);
+                lock (_knownLock) _knownProjectFiles = after;
+            }
+            catch { /* a stale baseline only costs an extra reload, never a missed change */ }
         }
         catch (Exception ex)
         {
