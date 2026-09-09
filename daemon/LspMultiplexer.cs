@@ -825,7 +825,16 @@ internal sealed class LspMultiplexer
                     // that inline would block the very thread that delivers change events — starving the watcher
                     // during exactly the window it is already losing events in, and deepening the overflow it is
                     // reacting to. The latch inside makes the pile-up harmless.
-                    _log($"project-model watch: buffer error ({e.GetException().Message}) — re-scanning the project set");
+                    //
+                    // ⚠️ RATE-LIMITED THE SAME WAY ITS OUTCOME IS, because the first version of this fix was not and
+                    // that was my own inconsistency: OnWatchOverflow reports quiet overflows at 1-then-every-100, while
+                    // THIS line fired once per event — 61,055 lines in the measured window. Coalescing the expensive
+                    // work and then narrating every coalesced event defeats the point; the latch already means these
+                    // are not 61,055 scans, so they must not read as 61,055 incidents either. First one always speaks
+                    // (a reader needs to know the watcher is being drowned at all), then every hundredth.
+                    int seen = Interlocked.Increment(ref _overflowSeen);
+                    if (seen == 1 || seen % 100 == 0)
+                        _log($"project-model watch: buffer error #{seen} ({e.GetException().Message}) — re-scanning the project set");
                     _ = Task.Run(OnWatchOverflow);
                 };
                 // Machinery, secondary and stated as such: a bigger buffer makes overflow RARER, never impossible, so
@@ -877,6 +886,11 @@ internal sealed class LspMultiplexer
     private Dictionary<string, DateTime> _knownProjectFiles = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _knownLock = new();
     private int _overflowQuiet;
+    /// <summary>Every overflow the watcher has reported, counted whether or not it produced a scan or a reload. Distinct
+    /// from <see cref="_overflowQuiet"/>, which counts only the ones a completed scan found nothing in: the gap between
+    /// the two is the share dropped by the single-flight latch, and that ratio is the thing a reader needs to judge
+    /// whether the box is churning or the model is actually moving.</summary>
+    private int _overflowSeen;
     /// <summary>Single-flight latch for the overflow re-scan. 0 = idle, 1 = a walk is in progress. Overflows arriving
     /// during a walk are DROPPED rather than queued: they ask the identical question ("did the project set move?") and
     /// the in-flight walk observes current truth, so it already answers the ones that land while it runs.</summary>

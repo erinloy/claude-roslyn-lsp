@@ -25,13 +25,48 @@ static async Task RunDaemon(
     Directory.CreateDirectory(dataDir);
     string logFile = Path.Combine(dataDir, $"daemon-{pipeName}.log");
     object logGate = new();
+
+    // 🩸 UNBOUNDED AND UNDATED, AND BOTH BIT THIS FLEET. Measured 2026-09-09 on this exact file:
+    // daemon-roslyn-lsp-51ee6c5eb9926e5c.log had reached 1.06 GB / 6,869,435 lines, of which 6,769,113 (98.8%)
+    // were per-file diagnostic chatter — so the 61,055 buffer-error and 9,998 reload lines that actually explain
+    // this daemon's behaviour sat at ONE signal line per 69. Five agents spent an evening reconstructing that
+    // behaviour from a process table while this file held it the whole time.
+    //
+    // ⚖️ AND THE TIMESTAMP CARRIED NO DATE. That sample spans 29 daemon starts across several days at
+    // "HH:mm:ss.fff", so "02:14:07" names several different moments and two lines from different days cannot be
+    // ordered at all. A log that cannot say WHEN is not a record, it is a rumour. Dates cost 11 characters.
+    //
+    // 🔑 ROTATION IS A BOUND, NOT THE CURE. The cure is not emitting a line per no-op, and it belongs at the
+    // call sites. This keeps the file READABLE and the disk honest: past the cap the current file becomes ".1"
+    // (replacing any previous .1) and a fresh one starts, so one root costs ~2× the cap instead of growing
+    // without limit. The size is counted IN PROCESS rather than stat-ed per line — 6.9 M stat calls is its own
+    // cost, and the count only has to be right to within one rotation. It is seeded from the file already on
+    // disk, so a daemon restarting into an oversized log rotates at once instead of appending another cap to it.
+    // FAIL-OPEN: any rotation error is swallowed and logging simply continues. Losing a line to tidiness would
+    // be a worse failure than the bytes it saves.
+    const long LogRotateBytes = 64L * 1024 * 1024;
+    long logBytes = 0;
+    try { logBytes = new FileInfo(logFile).Length; } catch { /* absent or unreadable — start the count at zero */ }
+
     void Log(string msg)
     {
-        string line = $"[{DateTime.Now:HH:mm:ss.fff}] {msg}";
+        string line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {msg}";
         lock (logGate)
         {
             Console.Error.WriteLine(line);
-            try { File.AppendAllText(logFile, line + Environment.NewLine); } catch { }
+            try
+            {
+                File.AppendAllText(logFile, line + Environment.NewLine);
+                // Chars, not bytes: non-ASCII undercounts, which errs toward a LARGER file and never toward
+                // rotating early. A bound that can only overshoot is the safe direction for a bound.
+                logBytes += line.Length + Environment.NewLine.Length;
+                if (logBytes >= LogRotateBytes)
+                {
+                    File.Move(logFile, logFile + ".1", overwrite: true);
+                    logBytes = 0;
+                }
+            }
+            catch { }
         }
     }
 
