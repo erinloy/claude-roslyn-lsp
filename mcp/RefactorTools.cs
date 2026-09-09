@@ -48,7 +48,31 @@ public sealed class RefactorTools
             RoslynDaemonClient client = await _session.GetAsync(call.Token).ConfigureAwait(false);
             return await body(client, call.Token).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)   // ours, not the host cancelling the call
+        // 🩸 THE HOST CANCELS FIRST, AND THAT USED TO SKIP THE DROP ENTIRELY — the defect this whole guard existed to
+        // prevent. ToolCeiling is 300 s; the MCP host's own tool timeout on this fleet is 120 s. So the host ALWAYS
+        // wins the race, `ct.IsCancellationRequested` is true, the old `when (!ct.IsCancellationRequested)` filter
+        // excluded the catch, and Invalidate() never ran. The wedged connection stayed cached for the life of the
+        // session — "one hang converted into an unending series of failures", which is verbatim what the remark above
+        // says this must not do.
+        //
+        // 📏 MEASURED 2026-09-09 by @testy, who could not recover and could not restart (MCP servers attach at SESSION
+        // START, so a poisoned cache is unrecoverable for the whole session): two calls, minutes apart, BOTH kinds:
+        //     search_symbols "LocalGraph"   workspace/symbol         timed out at 120 s
+        //     get_diagnostics <real .cs>    textDocument/diagnostic  timed out at 120 s
+        // while the same daemon answered other clients sub-second in the same window. Five hypotheses were measured
+        // and killed chasing why the DAEMON was at fault. It was not; the client never dropped its dead link.
+        //
+        // ⚖️ SO INVALIDATE ON EVERY CANCELLATION, and the asymmetry is the whole argument: dropping a HEALTHY
+        // connection costs one reconnect on the next call. NOT dropping a wedged one costs every remaining LSP call in
+        // the session, with no recovery path the agent can reach. Those are not comparable, so the doubtful case takes
+        // the cheap side. Host cancellation is still rethrown afterwards, because whether the caller gave up is not
+        // ours to reinterpret.
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)   // the HOST gave up (or the user did)
+        {
+            _session.Invalidate();
+            throw;   // cancellation semantics are the caller's; the drop is ours
+        }
+        catch (OperationCanceledException)                                     // ours: the hard ceiling tripped
         {
             _session.Invalidate();
             return Err($"'{tool}' hit the {ToolCeiling.TotalSeconds:0}s hard ceiling and was aborted — the daemon took the " +
