@@ -36,10 +36,21 @@ try {
     try { if ($m.WaitOne(0)) { try { $m.ReleaseMutex() } catch {} } else { $warm = $true } }
     catch [System.Threading.AbandonedMutexException] { } catch { } finally { $m.Dispose() }
 
+    # 🩸 SAY ONLY WHAT THE MUTEX PROVES. This used to render as "already indexed and SERVING", and the probe cannot
+    # support that word: the daemon holds "<endpoint>-daemon" FOR ITS WHOLE LIFE (the comment above says so), so a
+    # held mutex distinguishes "a process exists" from "no process exists" and nothing else. Not indexed. Not
+    # answering. Not answering YOU.
+    #
+    # ⚖️ MEASURED 2026-09-09 BY FOUR AGENTS, and it is the exact gap: two sessions had every LSP call time out at
+    # 120 s while two others were served normally BY THE SAME DAEMON — the fault was per-session CLIENT state (the
+    # known "client N read loop ended (NullReferenceException)", which strands one client while the server serves
+    # everyone else). Both stranded sessions had been told "already indexed and serving" at start, and one spent
+    # the evening concluding the daemon was wedged and should be reaped. It was serving 16% of a core at the time.
+    # A banner that overstates its probe does not merely mislead; it points the reader at the wrong subject.
     $state = if ($warm) {
-        'WARM NOW (a shared daemon for this workspace is already indexed and serving).'
+        'A DAEMON IS RUNNING for this workspace (a process holds the endpoint mutex — that is liveness, NOT proof it is indexed, and NOT proof it will answer this session).'
     } else {
-        'warming (a daemon was just started for this workspace; it indexes in a few seconds).'
+        'no daemon held the endpoint yet, so one is starting for this workspace; it indexes in a few seconds.'
     }
 
     $banner = @"
@@ -53,6 +64,11 @@ PREFER the LSP over grep for any symbol / reference / type question — it is se
 - get_diagnostics  — current compiler + analyzer diagnostics for a file WITHOUT a build
 
 FIRST-CALL COLD EDGE: in a brand-new session the very first call can return "server is starting / has not finished indexing" — retry once, it warms in seconds; do not conclude the LSP is unreliable. A "no symbols found" result is a true empty answer only once indexed — if unsure, query a symbol you know exists to confirm the index is live before trusting a negative.
+
+IF YOUR CALLS TIME OUT, IT IS PROBABLY YOUR CLIENT, NOT THE DAEMON — measured 2026-09-09, four agents, one daemon: two sessions had every call time out at 120s while two others were served normally by that same daemon. The known fault is per-session ("client N read loop ended (NullReferenceException)" strands one client; the server keeps serving everyone else), so:
+- The cure is RESTARTING YOUR OWN MCP CONNECTION (/mcp → reconnect, or a new session). It is not reaping the daemon.
+- DO NOT diagnose the daemon by CPU. It is request/response, so 0% between requests is its CORRECT state — "flat CPU while elapsed climbs = wedged" is a rule for work that should be CONTINUOUS (a replay, a build, a boot) and it inverts here. An idle server and a wedged one look identical; only sending a request tells them apart.
+- Before concluding anything about the daemon, ask whether ANOTHER session is being served. If yes, the daemon is fine and the fault is yours to reset.
 "@
 
     Emit $banner
