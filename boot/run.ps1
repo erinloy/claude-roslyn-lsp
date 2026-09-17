@@ -96,9 +96,30 @@ if (-not (Test-Path $marker)) {
         Set-Content -LiteralPath (Join-Path $tmp '.shadow-complete') -Value $stamp -Encoding ascii
         if (-not (Test-Path $shadowDir)) { Move-Item -LiteralPath $tmp -Destination $shadowDir -ErrorAction Stop }
     } catch { Log "shadow copy failed: $_" } finally { if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue } }
+    # 🩸 THE REAPER DELETED LIVE SHADOWS, AND THAT IS THE 2026-09-01 SHAPE ABOVE. Every launch whose stamp differs — a
+    # rebuild, or the repo checkout and the installed copy, which resolve the same data root and so share this base —
+    # removed every other stamp, including the one a running host executes from. Remove-Item -Recurse deletes every
+    # file not held open and silently skips the rest. Measured 2026-09-17 on a scratch copy with a live MCP host in it:
+    # 42 files → 33, ALL .dll, ZERO .json — exactly "33 files, ALL .dll, NO .json". The marker guard heals the NEXT
+    # launch of that stamp; it cannot protect the process already running from it.
+    # ⇒ Claim a stale shadow by deleting its ENTRY DLL first. A running host maps its entry assembly and Windows refuses
+    #   to delete a mapped image, so success proves nothing runs from the directory — and with the entry gone nothing
+    #   new can start from it. Only then is the rest removed. Renaming the directory is NOT such a test (measured: it
+    #   succeeds under a live host). A copy in progress (<stamp>.tmp-<pid>) is left alone while its pid is alive.
     Get-ChildItem $shadowBase -Directory -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -ne $stamp } |
-        ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+        ForEach-Object {
+            if ($_.Name -match '\.tmp-(\d+)$') {
+                if (Get-Process -Id ([int]$Matches[1]) -ErrorAction SilentlyContinue) { return }
+            }
+            else {
+                $entry = Join-Path $_.FullName $p.dll
+                if (Test-Path -LiteralPath $entry) {
+                    try { Remove-Item -LiteralPath $entry -Force -ErrorAction Stop } catch { return }   # in use: live, keep
+                }
+            }
+            Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        }
 }
 if (-not (Test-Path $shadowDll)) { Log "shadow copy failed; falling back to bin (will lock $($p.dll))"; $shadowDll = $binDll }
 
