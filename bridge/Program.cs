@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using ClaudeRoslynLsp;          // PluginDataRoot (linked from shared/)
 using ClaudeRoslynLsp.Bridge;
 
 // claude-roslyn-lsp bridge entry point.
@@ -20,7 +21,9 @@ if (args.Contains("--version") || args.Contains("-v"))
 }
 
 // Logs NEVER go to stdout (that is the LSP wire). stderr + an optional rolling file under the data dir.
-string dataDir = ResolveDataDir();
+// shared/PluginDataRoot.cs — CLAUDE_PLUGIN_DATA\roslyn when Claude Code launched us, else ZILTCH_DATA_ROOT, else Z:\DATA,
+// else it throws naming them. A run by hand outside Claude Code resolves the same way; there is no AppData fallback.
+string dataDir = PluginDataRoot.Current;
 Directory.CreateDirectory(dataDir);
 string logFile = Path.Combine(dataDir, "bridge.log");
 object logGate = new();
@@ -76,14 +79,4 @@ catch (Exception ex)
 {
     Log($"FATAL: {ex}");
     return 1;
-}
-
-// The plugin passes CLAUDE_PLUGIN_DATA (a per-plugin writable dir). Fall back to a stable per-user location so the bridge
-// also works when run by hand outside Claude Code.
-static string ResolveDataDir()
-{
-    string? fromPlugin = Environment.GetEnvironmentVariable("CLAUDE_PLUGIN_DATA");
-    if (!string.IsNullOrWhiteSpace(fromPlugin)) return Path.Combine(fromPlugin, "roslyn");
-    string baseDir = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-    return Path.Combine(baseDir, "claude-roslyn-lsp");
 }

@@ -18,4 +18,16 @@
     <RollForward>LatestMajor</RollForward>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- This directory is also the shared-primitives folder the hosts link from, and DaemonConnector.cs /
+         RoslynDaemonClient.cs speak Sluice. Without this reference the project did not compile at all (CS0246 on
+         `Sluice`, six errors) — nothing noticed because ensure-built.ps1 never builds the bridge. -->
+    <ProjectReference Include="$(ExternalRoot)/Sluice/src/Sluice/Sluice.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The ONE data-root resolver (CLAUDE_PLUGIN_DATA → ZILTCH_DATA_ROOT → Z:\DATA → throw; never AppData), linked — never copied. -->
+    <Compile Include="../shared/PluginDataRoot.cs" Link="PluginDataRoot.cs" />
+  </ItemGroup>
+
 </Project>

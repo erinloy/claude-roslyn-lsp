@@ -31,6 +31,8 @@
     <Compile Include="../bridge/DaemonConnector.cs" Link="DaemonConnector.cs" />
     <!-- DaemonRouter resolves a file's workspace root from its uri (cross-repo routing). -->
     <Compile Include="../bridge/LspEdits.cs" Link="LspEdits.cs" />
+    <!-- The ONE data-root resolver (CLAUDE_PLUGIN_DATA → ZILTCH_DATA_ROOT → Z:\DATA → throw; never AppData). -->
+    <Compile Include="../shared/PluginDataRoot.cs" Link="PluginDataRoot.cs" />
   </ItemGroup>
 
 </Project>

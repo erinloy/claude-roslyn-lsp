@@ -10,7 +10,8 @@ namespace ClaudeRoslynLsp.Extensions;
 ///
 /// Why this shape:
 /// <list type="bullet">
-/// <item>SHADOW COPY — the host loads <c>&lt;localappdata&gt;/.../ext-shadow/&lt;name&gt;/&lt;n&gt;/X.dll</c>, never the manifest path,
+/// <item>SHADOW COPY — the host loads <c>&lt;plugin data root&gt;/ext-shadow/&lt;host&gt;/&lt;name&gt;/&lt;n&gt;/X.dll</c> (see
+///   <c>shared/PluginDataRoot.cs</c>), never the manifest path,
 ///   so the author rebuilds the real dll while the host runs.</item>
 /// <item>COLLECTIBLE ALC per extension — a reload unloads the old context and loads the new dll. The FUNCTIONAL guarantee
 ///   (new code runs) needs only the new context; the old context unloading is best-effort cleanup, so a stray reference
@@ -47,9 +48,8 @@ public sealed class ReloadableExtensionHost : IAsyncDisposable
         Func<string, JsonObject?, ExtensionContext> contextFactory, Action onReloaded, CancellationToken ct)
     {
         _hostName = hostName; _log = log; _contextFactory = contextFactory; _onReloaded = onReloaded; _ct = ct;
-        _shadowRoot = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "claude-roslyn-lsp", "ext-shadow", hostName);
+        // The plugin data root (shared/PluginDataRoot.cs), never AppData; it throws, naming its variables, when none applies.
+        _shadowRoot = Path.Combine(PluginDataRoot.Current, "ext-shadow", hostName);
     }
 
     /// <summary>Load every enabled manifest extension, initialize it, and start watching for rebuilds.</summary>

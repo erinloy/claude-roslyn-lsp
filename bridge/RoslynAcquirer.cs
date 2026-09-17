@@ -92,7 +92,10 @@ internal static class RoslynAcquirer
     {
         using var http = NewHttp();
         string url = $"https://api.nuget.org/v3-flatcontainer/{idLower}/{version}/{idLower}.{version}.nupkg";
-        string tmp = Path.Combine(Path.GetTempPath(), $"{idLower}.{version}.{Guid.NewGuid():N}.nupkg");
+        // The download lands BESIDE its destination, inside the plugin data root — never Path.GetTempPath(), which on
+        // Windows is %LOCALAPPDATA%\Temp (Erin, 2026-09-17: no plugin state in AppData). Same directory as the
+        // extraction also means the same volume, and the finally below removes it whether or not extraction succeeds.
+        string tmp = $"{versionDir}.{Guid.NewGuid():N}.nupkg";
         try
         {
             await using (var resp = await http.GetStreamAsync(url, ct).ConfigureAwait(false))

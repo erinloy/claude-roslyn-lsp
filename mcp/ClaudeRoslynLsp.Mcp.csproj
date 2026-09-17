@@ -38,6 +38,9 @@
     <Compile Include="../bridge/RoslynDaemonClient.cs" Link="RoslynDaemonClient.cs" />
     <Compile Include="../bridge/LspEdits.cs" Link="LspEdits.cs" />
     <Compile Include="../bridge/RoslynOps.cs" Link="RoslynOps.cs" />
+    <!-- The ONE data-root resolver (CLAUDE_PLUGIN_DATA → ZILTCH_DATA_ROOT → Z:\DATA → throw; never AppData). Internal, so
+         extensions-api's own linked copy stays invisible here and the two never collide. -->
+    <Compile Include="../shared/PluginDataRoot.cs" Link="PluginDataRoot.cs" />
   </ItemGroup>
 
 </Project>

@@ -21,4 +21,10 @@
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The ONE data-root resolver (CLAUDE_PLUGIN_DATA → ZILTCH_DATA_ROOT → Z:\DATA → throw; never AppData), for the
+         extension shadow copies. Linked, and INTERNAL: it is not part of the extension contract. -->
+    <Compile Include="../shared/PluginDataRoot.cs" Link="PluginDataRoot.cs" />
+  </ItemGroup>
+
 </Project>

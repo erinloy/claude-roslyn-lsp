@@ -15,7 +15,12 @@ param([string]$Root = "$PSScriptRoot\..")
 $ErrorActionPreference = 'Continue'
 $Root = (Resolve-Path $Root).Path
 
-$logDir = Join-Path $env:LOCALAPPDATA 'claude-roslyn-lsp'
+# THE ONE DATA-ROOT RULE (boot/data-root.ps1, twin of shared/PluginDataRoot.cs): CLAUDE_PLUGIN_DATA\roslyn, else
+# ZILTCH_DATA_ROOT\claude-roslyn-lsp, else Z:\DATA\claude-roslyn-lsp. With none of them it THROWS, naming them, and this
+# hook fails visibly at SessionStart — deliberately, since everything the plugin launches would fail on the same rule a
+# moment later with a less direct message. It used to be %LOCALAPPDATA%; Erin, 2026-09-17: no plugin state in AppData.
+. (Join-Path $PSScriptRoot 'data-root.ps1')
+$logDir = Resolve-PluginDataRoot
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $logFile = Join-Path $logDir 'ensure-built.log'
 function L([string]$m) { "$([DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss.fff')) $m" | Out-File -FilePath $logFile -Append -Encoding utf8 }
@@ -60,17 +65,49 @@ $externalRoot = Resolve-ExternalRoot $Root
 if ($externalRoot) { $env:ZILTCH_EXTERNAL_ROOT = $externalRoot; L "external root: $externalRoot" }
 else { L "WARN: could not locate the vendored externals (Sluice) — builds will fail with MSB9008" }
 
-$bridgeDir = Join-Path $Root 'bridge'
-function Newest-Source([string]$projDir) {
-    $files = @()
-    foreach ($dir in @($projDir, $bridgeDir)) {
-        if (Test-Path $dir) {
-            $files += Get-ChildItem -Path $dir -Recurse -Include *.cs, *.csproj -ErrorAction SilentlyContinue |
-                Where-Object { $_.FullName -notmatch '[\\/](bin|obj)[\\/]' }
-        }
+# WHAT A PROJECT IS BUILT FROM, READ FROM ITS CSPROJ RATHER THAN ASSUMED: its own directory, every <Compile Include> it
+# links from elsewhere (bridge/*.cs, shared/PluginDataRoot.cs), and — recursively — every in-plugin <ProjectReference>
+# (extensions-api/). A $(ExternalRoot) reference (Sluice, ConsoleAppFramework) is vendored, not this plugin's source, and
+# is not tracked.
+#
+# 🩸 THE OLD RULE WAS "own directory + ALL of bridge/", AND IT REBUILT ON EVERY SESSION START once any bridge/ file a
+# project does not compile was edited (RoslynAcquirer.cs is not in the client or the cli; bridge's own csproj is in none).
+# That file stays newer than the dll forever, because the build it triggers is a correct no-op that never rewrites the
+# dll. Measured 2026-09-17: two consecutive runs with no source change between them each rebuilt daemon, mcp, client and
+# cli. The opposite gap was open too: shared/ (new) and extensions-api/ were in no project's list at all.
+#
+# ⚖️ AND THE COMPARISON IS AGAINST THE NEWEST FILE IN THE OUTPUT DIRECTORY, NOT THE PRIMARY DLL — the same stamp run.ps1
+# uses. A change inside a referenced project that leaves its public surface alone does not recompile the referencing
+# project (its reference assembly is unchanged), so the primary dll keeps its old time while the referenced dll copied
+# beside it is new. Against the primary dll alone that is the same forever-stale loop.
+function Get-ProjectSources([string]$csproj, [hashtable]$seen) {
+    $full = [System.IO.Path]::GetFullPath($csproj)
+    if ($seen.ContainsKey($full)) { return @() }
+    $seen[$full] = $true
+    $dir = Split-Path $full -Parent
+    $files = @(Get-Item -LiteralPath $full)
+    $files += @(Get-ChildItem -Path $dir -Recurse -Include *.cs, *.csproj -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -notmatch '[\\/](bin|obj)[\\/]' })
+    [xml]$xml = Get-Content -LiteralPath $full -Raw
+    foreach ($c in $xml.SelectNodes('//Compile[@Include]')) {
+        $path = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($dir, $c.Include))
+        if (-not (Test-Path -LiteralPath $path)) { throw "$full compiles $($c.Include), which does not exist" }
+        $files += Get-Item -LiteralPath $path
     }
+    foreach ($r in $xml.SelectNodes('//ProjectReference[@Include]')) {
+        if ($r.Include -match '\$\(') { continue }
+        $files += Get-ProjectSources ([System.IO.Path]::Combine($dir, $r.Include)) $seen
+    }
+    $files
+}
+function Newest-Source([string]$csproj) {
+    try { $files = @(Get-ProjectSources $csproj @{}) } catch { L "cannot enumerate sources of ${csproj}: $_ — building"; return [DateTime]::MaxValue }
     if ($files.Count -eq 0) { return [DateTime]::MaxValue }  # can't see sources → force a build
     ($files | Measure-Object -Property LastWriteTimeUtc -Maximum).Maximum
+}
+function Newest-Output([string]$dll) {
+    (Get-ChildItem -LiteralPath (Split-Path $dll -Parent) -File -ErrorAction SilentlyContinue |
+        Measure-Object -Property LastWriteTimeUtc -Maximum).Maximum
 }
 
 $failed = @()
@@ -81,13 +118,11 @@ try {
     foreach ($p in $projects) {
         $csproj  = Join-Path $Root $p.csproj
         $dll     = Join-Path $Root $p.dll
-        $projDir = Split-Path $csproj -Parent
         if (-not (Test-Path $csproj)) { L "SKIP $($p.name): csproj not found ($csproj)"; continue }
 
         $needs = $true
         if (Test-Path $dll) {
-            $newest = Newest-Source $projDir
-            $needs = (Get-Item $dll).LastWriteTimeUtc -lt $newest
+            $needs = (Newest-Output $dll) -lt (Newest-Source $csproj)
         }
         if (-not $needs) { L "$($p.name) up-to-date"; continue }
 

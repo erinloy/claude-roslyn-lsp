@@ -22,7 +22,7 @@
       "license": "MIT",
       "lspServers": {
         "csharp": {
-          "command": "${LOCALAPPDATA}\\Programs\\PowerShell\\7\\pwsh.exe",
+          "command": "pwsh",
           "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${CLAUDE_PLUGIN_ROOT}/boot/run.ps1", "client"],
           "transport": "stdio",
           "extensionToLanguage": {

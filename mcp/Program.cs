@@ -1,3 +1,4 @@
+using ClaudeRoslynLsp;          // PluginDataRoot (linked from shared/)
 using ClaudeRoslynLsp.Bridge;
 using ClaudeRoslynLsp.Extensions;
 using ClaudeRoslynLsp.Mcp;
@@ -33,11 +34,13 @@ builder.Services.AddSingleton<DaemonSession>();
 // 🔑 IT LOGS THE RESOLVED ROOT, NOT THE CWD, because the resolved root is the question. A record saying where the
 // process started cannot answer which daemon it keyed to, and the gap between those two is the entire defect this
 // fleet chased tonight.
+//
+// 🔑 THE ROOT IS RESOLVED OUTSIDE THE TRY. shared/PluginDataRoot.cs throws, naming the variables, when no data root
+// applies (there is no AppData fallback any more — Erin, 2026-09-17). That is a configuration error for the whole
+// process, not a failed best-effort write, so it must not be caught and reworded as "could not write the launch record".
+string launchDir = PluginDataRoot.Current;
 try
 {
-    string launchDir = Environment.GetEnvironmentVariable("CLAUDE_PLUGIN_DATA") is { Length: > 0 } pdir
-        ? Path.Combine(pdir, "roslyn")
-        : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "claude-roslyn-lsp");
     Directory.CreateDirectory(launchDir);
     string cwdNow = Directory.GetCurrentDirectory();
     string envRoot = Environment.GetEnvironmentVariable("CLAUDE_ROSLYN_WORKSPACE_ROOT") ?? "";

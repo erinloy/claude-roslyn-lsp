@@ -139,8 +139,19 @@ extension dll is never locked. Full contract and a worked example: [extensions-a
 
 ## Configuration
 
+Runtime data — shadow copies of the built binaries, the downloaded server, logs, launch records, extension shadows, patch
+markers — lives under ONE data root, resolved by `shared/PluginDataRoot.cs` (C#) and its twin `boot/data-root.ps1`:
+
+1. `CLAUDE_PLUGIN_DATA` (set by Claude Code for the processes it launches) → `<it>\roslyn`
+2. else `ZILTCH_DATA_ROOT` → `<it>\claude-roslyn-lsp`
+3. else `Z:\DATA\claude-roslyn-lsp`, when `Z:\DATA` exists
+4. else every component fails at start with a message naming these variables.
+
+There is no fallback to AppData, the user profile or the temp directory.
+
 | Variable | Effect |
 |---|---|
+| `ZILTCH_DATA_ROOT` | Data root for runs outside Claude Code (see above). |
 | `CLAUDE_ROSLYN_SOLUTION` | Solution or project to open (absolute, or relative to the workspace root). Set this in a multi-solution repo, e.g. `src/App.slnx`. Otherwise the daemon picks the `.slnx`/`.sln` at or one level under the root. |
 | `CLAUDE_ROSLYN_VERSION` | Pin an exact Roslyn server version instead of the latest published. |
 | `CLAUDE_ROSLYN_SERVER_PATH` | Use an already-extracted `Microsoft.CodeAnalysis.LanguageServer.dll` and skip the download. |
@@ -183,6 +194,9 @@ boot/
   ensure-built.ps1                mutex-guarded build-once of client/daemon/mcp/cli; prewarm
   lsp-patch.ps1                   check/apply the Claude Code LSP-tool patch
   lsp-banner.ps1                  SessionStart presence notice for the LSP tools
+  data-root.ps1                   the data-root resolver (twin of shared/PluginDataRoot.cs)
+shared/
+  PluginDataRoot.cs               the data-root resolver, linked into every host project
 client/
   lsp-client.cs                   thin client: connect-or-start the daemon, forward stdio
   Router.cs                       route each file to the daemon that owns its repo

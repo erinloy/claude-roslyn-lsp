@@ -6,7 +6,9 @@
   outputs stay persistently locked and `ensure-built`'s rebuild fails with MSB3027 "being used by another process".
 
   The fix: never run from `bin`. `bin` is a pure BUILD output — only ever written, never loaded. This script copies the
-  freshly-built output to a per-build shadow directory under %LOCALAPPDATA% and execs from THERE, so:
+  freshly-built output to a per-build shadow directory under the plugin data root (boot/data-root.ps1:
+  CLAUDE_PLUGIN_DATA\roslyn, else ZILTCH_DATA_ROOT\claude-roslyn-lsp, else Z:\DATA\claude-roslyn-lsp, else it fails —
+  never AppData, Erin 2026-09-17) and execs from THERE, so:
     - the build output (`bin`) is never locked -> rebuilds always succeed, at any number of concurrent instances;
     - each distinct build (identified by the newest mtime in `bin`) gets its own shadow dir, so a rebuild mid-session
       produces a NEW shadow the next launch picks up, while running processes keep their own (older) shadow alive;
@@ -53,19 +55,47 @@ if (-not (Test-Path $binDll)) { Log "build output missing: $binDll (run ensure-b
 # the primary dll didn't change. Cheap over the few-dozen files in an output dir.
 $newest = (Get-ChildItem $binDir -File -ErrorAction SilentlyContinue | Measure-Object -Property LastWriteTimeUtc -Maximum).Maximum
 $stamp = ('{0:x}' -f $newest.Ticks)
-$shadowBase = Join-Path $env:LOCALAPPDATA "claude-roslyn-lsp\shadow\$Project"
+
+# THE ONE DATA-ROOT RULE (boot/data-root.ps1, twin of shared/PluginDataRoot.cs). No root is a hard failure with the
+# resolver's own message, never a guessed directory: the shadow used to live under %LOCALAPPDATA%, which was wiped
+# wholesale on 2026-09-17 — the day this moved.
+. (Join-Path $PSScriptRoot 'data-root.ps1')
+try { $dataRoot = Resolve-PluginDataRoot } catch { Log $_.Exception.Message; exit 1 }
+$shadowBase = [System.IO.Path]::Combine($dataRoot, 'shadow', $Project)
 $shadowDir = Join-Path $shadowBase $stamp
 $shadowDll = Join-Path $shadowDir $p.dll
 
 # Copy-if-missing. Copy to a unique temp dir then atomically rename into place, so two instances racing the first launch
 # after a build can't see a half-populated shadow (the loser's temp is discarded).
-if (-not (Test-Path $shadowDll)) {
+#
+# 🩸 THE GUARD IS A COMPLETION MARKER, NOT THE PAYLOAD DLL, AND THAT DISTINCTION COST A DEAD MCP SERVER.
+# MEASURED 2026-09-01: shadow\mcp\<stamp>\ held 33 files, ALL .dll, NO .json — including no
+# ClaudeRoslynLsp.Mcp.runtimeconfig.json. A framework-dependent app cannot start without it: the host falls back to
+# "self-contained", looks for hostpolicy.dll, does not find it, and dies with a message about hostpolicy that names
+# neither the real missing file nor the shadow copy as the cause. Claude Code reported only "Connection closed".
+# ⇒ The old guard was `Test-Path $shadowDll`. `ClaudeRoslynLsp.Mcp.dll` WAS present, so the guard read the shadow as
+#   complete and skipped the copy FOREVER. One incomplete promotion became permanent, and no retry could heal it:
+#   inferring a directory's completeness from ONE file inside it is the same absence-reads-as-normal defect that
+#   two-state instruments have, applied to a filesystem.
+# ⇒ The marker is written INTO $tmp BEFORE the rename, so it appears atomically WITH the content it certifies. A
+#   marker written after the move would itself be a window where the shadow looks complete and is not.
+$marker = Join-Path $shadowDir '.shadow-complete'
+if (-not (Test-Path $marker)) {
     New-Item -ItemType Directory -Force -Path $shadowBase | Out-Null
+    # A shadow that failed verification must not be left standing: it is what the old guard would trust next time.
+    if (Test-Path $shadowDir) { Remove-Item $shadowDir -Recurse -Force -ErrorAction SilentlyContinue }
     $tmp = "$shadowDir.tmp-$PID"
     try {
         $null = robocopy $binDir $tmp /E /NJH /NJS /NP /NDL /NFL /R:1 /W:1
+        # 🛑 ROBOCOPY'S EXIT CODE WAS DISCARDED, WHICH IS HOW AN INCOMPLETE COPY GOT PROMOTED IN THE FIRST PLACE.
+        # Robocopy is not a normal exit-code citizen: 0-7 are success (0 = nothing to do, 1 = files copied, 2 = extras,
+        # 4 = mismatches), and >= 8 means at least one file FAILED to copy. Promoting on failure publishes a partial
+        # directory under the name everything else trusts.
+        $rc = $LASTEXITCODE
+        if ($rc -ge 8) { throw "robocopy failed with exit $rc copying $binDir" }
+        Set-Content -LiteralPath (Join-Path $tmp '.shadow-complete') -Value $stamp -Encoding ascii
         if (-not (Test-Path $shadowDir)) { Move-Item -LiteralPath $tmp -Destination $shadowDir -ErrorAction Stop }
-    } catch { } finally { if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue } }
+    } catch { Log "shadow copy failed: $_" } finally { if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue } }
     Get-ChildItem $shadowBase -Directory -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -ne $stamp } |
         ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
@@ -108,7 +138,7 @@ if ($Detached) {
     #
     # Append (not truncate) so a recycle's own message survives into the next process's file, and keep it per-project
     # so daemon/client/mcp do not interleave. Cheap: these are low-rate lifecycle lines, not a trace.
-    $logRoot = Join-Path $env:LOCALAPPDATA 'claude-roslyn-lsp\logs'
+    $logRoot = [System.IO.Path]::Combine($dataRoot, 'logs')
     New-Item -ItemType Directory -Force -Path $logRoot -ErrorAction SilentlyContinue | Out-Null
     $outLog = Join-Path $logRoot "$Project.out.log"
     $errLog = Join-Path $logRoot "$Project.err.log"

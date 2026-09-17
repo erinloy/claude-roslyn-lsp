@@ -23,6 +23,8 @@ function Emit([string]$text) {
 }
 
 try {
+    . (Join-Path $PSScriptRoot 'data-root.ps1')   # Resolve-PluginDataRoot — the one data-root rule
+
     # Is a daemon already warm for this workspace? (Same liveness signal ensure-built uses: the daemon holds
     # "<endpoint>-daemon" for its whole life. Taking the mutex means none is running yet — it's warming.)
     $ws = $env:CLAUDE_PROJECT_DIR
@@ -98,17 +100,26 @@ try {
     # for this endpoint can be a GIGABYTE (measured: 1.06 GB), so it is seeked from the END and never read whole.
     $mine = $null
     try {
-        # ⚠️ THE LOG DIRECTORY IS THE DAEMON'S CHOICE, NOT OURS, AND THE TWO CAN DIFFER. ResolveDataDir picks
-        # $CLAUDE_PLUGIN_DATA\roslyn when that is set and %LOCALAPPDATA%\claude-roslyn-lsp otherwise — evaluated in
-        # the DAEMON's environment at ITS launch, which is a different process from this hook and may have had a
-        # different environment. Measured 2026-09-09: client-launch.log exists in BOTH locations, the plugin-data one
-        # live and the LOCALAPPDATA one six weeks stale, and reading only the second is what made a working code path
-        # look dead to a whole fleet. So try both and take whichever actually holds this endpoint's log; guessing one
-        # would produce a confident "no solution/open" from a file that was simply not the daemon's.
-        $dataDirs = @()
-        if ($env:CLAUDE_PLUGIN_DATA) { $dataDirs += (Join-Path $env:CLAUDE_PLUGIN_DATA 'roslyn') }
-        $dataDirs += (Join-Path $env:LOCALAPPDATA 'claude-roslyn-lsp')
-        $dataDirs += (Join-Path $env:USERPROFILE '.claude\plugins\data\roslyn-claude-roslyn-lsp\roslyn')
+        # ⚠️ THE LOG DIRECTORY IS THE DAEMON'S CHOICE, NOT OURS, AND THE TWO CAN DIFFER. The daemon resolves its data
+        # root (shared/PluginDataRoot.cs) in ITS environment at ITS launch: CLAUDE_PLUGIN_DATA\roslyn when that is set,
+        # else the Ziltch data root (ZILTCH_DATA_ROOT, else Z:\DATA) + \claude-roslyn-lsp. A daemon started from a
+        # Claude Code process gets the first; one started by hand (crlsp, a manual run.ps1) gets the second. Measured
+        # 2026-09-09: client-launch.log existed in two roots, one live and one six weeks stale, and reading only the
+        # stale one made a working code path look dead to a whole fleet. So ask the ONE resolver (boot/data-root.ps1)
+        # for both answers and take whichever actually holds this endpoint's log.
+        #
+        # 🚫 NO APPDATA CANDIDATE (Erin, 2026-09-17: "get that kind of stuff out of appdata"). The pre-move fallback root
+        # under %LOCALAPPDATA% is not read. A daemon started before the move by a Claude Code process logs under
+        # CLAUDE_PLUGIN_DATA\roslyn, which is still a candidate; only a hand-started pre-move daemon logged under
+        # %LOCALAPPDATA%, and that directory was wiped the morning of the move.
+        $dataDirs = @(Resolve-PluginDataRoot)   # no root at all → throws → reported in $mine below
+        # The no-CLAUDE_PLUGIN_DATA answer. When it throws there IS no such root, so no hand-started daemon can have
+        # logged to one (it would have failed on the same rule at its own start) — there is nothing to look for.
+        try { $dataDirs += (Resolve-PluginDataRoot -PluginData '') } catch { }
+        # This hook can run without CLAUDE_PLUGIN_DATA while the daemon had it: Claude Code's per-plugin data dir for
+        # this plugin, spelled out.
+        $dataDirs += [System.IO.Path]::Combine($env:USERPROFILE, '.claude', 'plugins', 'data', 'roslyn-claude-roslyn-lsp', 'roslyn')
+        $dataDirs = @($dataDirs | Select-Object -Unique)
 
         # The daemon carries --root on its command line, so this is a READ, not a guess at which daemon is ours.
         #
@@ -244,7 +255,7 @@ try {
             }
             else { $mine = 'YOUR daemon is running but has NOT started a language server yet — the first call starts it.' }
         }
-    } catch { $mine = $null }
+    } catch { $mine = "Could not identify which server belongs to this workspace ($($_.Exception.Message)), so nothing below is claimed about YOURS specifically." }
     if (-not $mine) { $mine = 'Could not identify which server belongs to this workspace, so nothing below is claimed about YOURS specifically.' }
 
     $banner = @"

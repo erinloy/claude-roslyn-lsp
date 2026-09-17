@@ -1,3 +1,4 @@
+using ClaudeRoslynLsp;          // PluginDataRoot (linked from shared/)
 using ClaudeRoslynLsp.Bridge;   // RoslynAcquirer, RoslynServer, PipeKey (linked)
 using ClaudeRoslynLsp.Daemon;
 using ConsoleAppFramework;
@@ -21,7 +22,8 @@ static async Task RunDaemon(
     string pipeName = pipe ?? PipeKey.ForRoot(root);
     string? solutionOverride = solution ?? Environment.GetEnvironmentVariable(SolutionLocator.OverrideEnvVar);
 
-    string dataDir = ResolveDataDir();
+    // shared/PluginDataRoot.cs — CLAUDE_PLUGIN_DATA\roslyn, else ZILTCH_DATA_ROOT, else Z:\DATA; throws otherwise, never AppData.
+    string dataDir = PluginDataRoot.Current;
     Directory.CreateDirectory(dataDir);
     string logFile = Path.Combine(dataDir, $"daemon-{pipeName}.log");
     object logGate = new();
@@ -139,13 +141,6 @@ static async Task AcceptLoopAsync(string endpoint, LspMultiplexer mux, Action<st
 static async Task WaitForExitAsync(System.Diagnostics.Process p, CancellationToken ct)
 {
     try { await p.WaitForExitAsync(ct).ConfigureAwait(false); } catch (OperationCanceledException) { }
-}
-
-static string ResolveDataDir()
-{
-    string? fromPlugin = Environment.GetEnvironmentVariable("CLAUDE_PLUGIN_DATA");
-    if (!string.IsNullOrWhiteSpace(fromPlugin)) return Path.Combine(fromPlugin, "roslyn");
-    return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "claude-roslyn-lsp");
 }
 
 /// <summary>Exits the daemon after a continuous window with zero clients, so an idle workspace frees its memory —

@@ -81,15 +81,18 @@ public static class ExtensionLoader
     }
 
     // Copy the extension's whole output directory to a per-load shadow location and return the copied main dll, so the
-    // original is never memory-mapped/locked by this host. Falls back to the original path if the copy fails.
+    // original is never memory-mapped/locked by this host. Falls back to the original path if the COPY fails.
+    //
+    // The shadow lives under the plugin data root (shared/PluginDataRoot.cs), never AppData. That root is resolved
+    // OUTSIDE the try: "no data root" is a configuration error that throws naming its variables, and catching it here
+    // would relabel it "shadow-copy failed" and quietly load in place. It propagates to Load's per-extension catch, which
+    // logs the resolver's own message.
     private static string ShadowCopyForLoad(string originalDll, string name, string host, Action<string> log)
     {
+        string dst = Path.Combine(PluginDataRoot.Current, "ext-shadow", host, name, Guid.NewGuid().ToString("N")[..8]);
         try
         {
             string srcDir = Path.GetDirectoryName(originalDll)!;
-            string dst = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "claude-roslyn-lsp", "ext-shadow", host, name, Guid.NewGuid().ToString("N")[..8]);
             Directory.CreateDirectory(dst);
             foreach (string f in Directory.GetFiles(srcDir))
             {

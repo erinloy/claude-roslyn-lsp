@@ -26,7 +26,11 @@
 param([ValidateSet('check', 'apply')][string]$Mode = 'check')
 
 $ErrorActionPreference = 'Continue'
-$markerDir = Join-Path $env:LOCALAPPDATA 'claude-roslyn-lsp\lsp-patch'
+# Markers and log live under the plugin data root (boot/data-root.ps1: CLAUDE_PLUGIN_DATA\roslyn, else ZILTCH_DATA_ROOT,
+# else Z:\DATA; throws naming them otherwise) — never AppData (Erin, 2026-09-17). Markers are regenerable: `check`
+# re-derives native-ok from a running client, `apply` re-verifies.
+. (Join-Path $PSScriptRoot 'data-root.ps1')
+$markerDir = [System.IO.Path]::Combine((Resolve-PluginDataRoot), 'lsp-patch')
 New-Item -ItemType Directory -Force -Path $markerDir | Out-Null
 $logFile = Join-Path $markerDir 'lsp-patch.log'
 function L([string]$m) { "$([DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss')) [$Mode] $m" | Out-File -FilePath $logFile -Append -Encoding utf8 }
@@ -110,7 +114,7 @@ if ($LASTEXITCODE -ne 0 -or ($out -match 'EBUSY')) {
 # Unpack the freshly-patched binary and the stock backup; if their embedded JS is identical, the patch was a no-op.
 $claudeExe = (Get-Command claude -ErrorAction SilentlyContinue)?.Source
 if ($claudeExe -and (Test-Path $backup)) {
-    $tmp = Join-Path $env:TEMP 'crlsp-verify'
+    $tmp = Join-Path $markerDir 'verify'   # not $env:TEMP, which is under AppData on Windows
     New-Item -ItemType Directory -Force -Path $tmp | Out-Null
     $curJs = Join-Path $tmp 'cur.js'; $bakJs = Join-Path $tmp 'bak.js'
     & $cmd[0] @($cmd[1..($cmd.Count-1)] + @('unpack', $curJs, $claudeExe)) 2>&1 | Out-Null

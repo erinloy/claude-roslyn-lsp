@@ -14,6 +14,7 @@
 
 using System.Runtime.CompilerServices;
 using System.Text;
+using ClaudeRoslynLsp;          // PluginDataRoot (linked from shared/) — the one data-root rule
 using ClaudeRoslynLsp.Bridge;   // PipeKey, DaemonConnector, LspMessageReader/Writer (linked) — single source of truth
 using ClaudeRoslynLsp.Client;   // DaemonRouter — per-file routing across repos + daemon-death watch
 using Sluice;                   // IFrameChannel — the client↔daemon transport
@@ -22,9 +23,10 @@ static string ScriptPath([CallerFilePath] string p = "") => p;
 
 // Unconditional launch record — written before ANYTHING else can fail — so we can tell "Claude never launched the
 // client" (no file) from "Claude launched it but it died" (file present, with the failure in client.log).
-string launchLogDir = Environment.GetEnvironmentVariable("CLAUDE_PLUGIN_DATA") is { Length: > 0 } pd
-    ? Path.Combine(pd, "roslyn")
-    : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "claude-roslyn-lsp");
+// The directory is shared/PluginDataRoot.cs's answer: CLAUDE_PLUGIN_DATA\roslyn, else ZILTCH_DATA_ROOT, else Z:\DATA. With
+// none of them it THROWS here, naming them, and the client dies at launch with that message on stderr — deliberately:
+// there is no AppData fallback (Erin, 2026-09-17), and a client that guessed a directory would log where nobody looks.
+string launchLogDir = PluginDataRoot.Current;
 try
 {
     Directory.CreateDirectory(launchLogDir);
