@@ -1080,8 +1080,17 @@ internal sealed class LspMultiplexer
         try
         {
             int n = Interlocked.Increment(ref _reloadCount);
+            var reloadSw = Stopwatch.StartNew();
             _log($"project-model changed — re-opening workspace (reload #{n})");
             await OpenWorkspaceAsync(_watchRoot, _watchSolutionOverride).ConfigureAwait(false);
+            reloadSw.Stop();
+            // 🩸 THE RELOAD HAD A START LINE AND NO END LINE, so its duration — the number that decides whether a
+            // reload window is a blip or a blackout for every connected client — was unmeasurable from the log.
+            // Measured the hard way 2026-09-20: SEVEN re-opens in one evening (the fleet's kill-resilience push
+            // registers each new gate-test project in src/___.slnx, and the watcher re-opens the whole 357-project
+            // graph per change) while the operator and five agents reconstructed "how long is a reload" from a
+            // process table. The start line without this one is an interval with only one endpoint.
+            _log($"project-model reload #{n} COMPLETE in {reloadSw.Elapsed.TotalSeconds:0.0}s — serving clients again");
             // RE-BASELINE AFTER THE LOAD, not before it: the set this daemon is now serving is the one a later
             // overflow must be compared against. Taking it before the re-open would compare the next overflow against
             // a graph we never loaded.
