@@ -17,6 +17,14 @@
   -->
   <PropertyGroup>
     <ExternalRoot Condition="'$(ExternalRoot)' == '' and '$(ZILTCH_EXTERNAL_ROOT)' != ''">$(ZILTCH_EXTERNAL_ROOT)</ExternalRoot>
+    <!-- VENDORED-IN-PLACE first: when this repo sits INSIDE a host's external/ folder, that folder IS the root,
+         and it is recognised by the sibling it must contain. Probing for the thing itself beats assuming a layout:
+         the old default below hard-coded the SIBLING arrangement, and from the vendored home it resolved to
+         external/___/external - a path that does not exist - producing CS0246 'Sluice'/'IFrameChannel' that reads
+         exactly like a broken HEAD. Cost of assuming: a cell outage, a bare revert of a correct fix, and three
+         separate build-script workarounds, all in one night. -->
+    <ExternalRoot Condition="'$(ExternalRoot)' == '' and Exists('$(MSBuildThisFileDirectory)../Sluice')">$(MSBuildThisFileDirectory)..</ExternalRoot>
+    <!-- SIBLING layout: the plain checkout, where the host repo sits next to this one. -->
     <ExternalRoot Condition="'$(ExternalRoot)' == ''">$(MSBuildThisFileDirectory)../___/external</ExternalRoot>
   </PropertyGroup>
 
