@@ -11,7 +11,12 @@
     <AssemblyName>ClaudeRoslynLsp.Mcp</AssemblyName>
     <RootNamespace>ClaudeRoslynLsp.Mcp</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
-    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <!-- WORKSTATION GC (2026-09-22, @meshx). Live, the Server-GC proxies sat at ~230 MB private after ~60 min (one per
+         agent session) while the net8 client, same relay job on workstation GC, sat at 10-16 MB. A/B on this binary:
+         at initialize 29 MB / 51 threads (server) vs 13 MB / 17 threads (workstation); after 40 search_symbols calls
+         101 MB / 54 threads vs 94 MB / 24 threads. A relay has no use for 32 heaps. -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
   </PropertyGroup>
 
   <ItemGroup>

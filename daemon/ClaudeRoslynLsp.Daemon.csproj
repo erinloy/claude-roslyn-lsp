@@ -11,7 +11,9 @@
     <AssemblyName>ClaudeRoslynLsp.Daemon</AssemblyName>
     <RootNamespace>ClaudeRoslynLsp.Daemon</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
-    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <!-- WORKSTATION GC (2026-09-22, @meshx): Server GC reserved one heap per core (32) for a relay whose heavy lifting
+         happens in the separate language-server process; measured 223 MB private at idle. -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
   </PropertyGroup>
 
   <ItemGroup>
