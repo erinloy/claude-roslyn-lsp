@@ -15,7 +15,7 @@ public static class DaemonConnector
     /// daemon that never comes up would hold the caller for the full ~120s regardless of its budget.</param>
     public static async Task<IFrameChannel?> ConnectAsync(
         string endpoint, string root, string? solution, string pluginRoot, Action<string> log,
-        CancellationToken ct = default)
+        CancellationToken ct = default, int requestIdleMin = 0)
     {
         // 1. Fast path: a daemon is already alive → connect to it.
         if (DaemonAlive(endpoint) && TryConnect(endpoint) is { } fast) return fast;
@@ -29,7 +29,7 @@ public static class DaemonConnector
             if (owner && !DaemonAlive(endpoint))
             {
                 log("no daemon — starting one (detached)");
-                StartDaemon(pluginRoot, root, solution, log);
+                StartDaemon(pluginRoot, root, solution, log, requestIdleMin);
             }
             // 3. Wait for the daemon to come up (first start also loads the workspace), then connect. Bounded twice: by
             //    the loop (~120s) and by the caller's token, so a caller with a tighter deadline is never held past it.
@@ -60,7 +60,7 @@ public static class DaemonConnector
         catch { return null; }
     }
 
-    private static void StartDaemon(string pluginRoot, string root, string? solution, Action<string> log)
+    private static void StartDaemon(string pluginRoot, string root, string? solution, Action<string> log, int requestIdleMin)
     {
         string daemonDll = Path.Combine(pluginRoot, "daemon", "bin", "Release", "net8.0", "ClaudeRoslynLsp.Daemon.dll");
 
@@ -87,6 +87,7 @@ public static class DaemonConnector
         psi.ArgumentList.Add("daemon"); psi.ArgumentList.Add("--detached");
         psi.ArgumentList.Add("--root"); psi.ArgumentList.Add(root);
         if (!string.IsNullOrWhiteSpace(solution)) { psi.ArgumentList.Add("--solution"); psi.ArgumentList.Add(solution!); }
+        if (requestIdleMin > 0) { psi.ArgumentList.Add("--request-idle-min"); psi.ArgumentList.Add(requestIdleMin.ToString(System.Globalization.CultureInfo.InvariantCulture)); }
         try { Process.Start(psi); }
         catch (Exception ex) { log($"failed to start daemon: {ex.Message}"); }
     }

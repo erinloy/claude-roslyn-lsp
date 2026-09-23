@@ -75,6 +75,11 @@ internal sealed class LspMultiplexer
 
     public int ClientCount => _clients.Count;
 
+    private long _lastClientRequestTicks = DateTime.UtcNow.Ticks;
+    /// <summary>When a client last sent a request (method + id). Starts at construction so a daemon nobody ever asks
+    /// is judged from its birth.</summary>
+    public DateTime LastClientRequestUtc => new(Interlocked.Read(ref _lastClientRequestTicks), DateTimeKind.Utc);
+
     /// <summary>Open-document count as Roslyn currently sees it — the quantity that scales with connected agents.</summary>
     public int OpenDocCount => _openDocs.Count;
 
@@ -281,6 +286,9 @@ internal sealed class LspMultiplexer
         if (json is null) return;
         string? method = json["method"]?.GetValue<string>();
         JsonNode? idNode = json["id"];
+        // A client REQUEST (method + id) is the only proof someone is still asking. Responses and notifications do not
+        // count: a connected-but-silent session sends none of the first and may send the second on its own schedule.
+        if (method is not null && idNode is not null) Interlocked.Exchange(ref _lastClientRequestTicks, DateTime.UtcNow.Ticks);
 
         // Hover augmentation: only when an extension contributes hover. Otherwise hover takes the unchanged generic
         // forward path below (zero behaviour change for the common case / a daemon with no hover extensions).

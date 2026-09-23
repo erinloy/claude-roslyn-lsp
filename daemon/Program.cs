@@ -13,10 +13,11 @@ await ConsoleApp.RunAsync(args, RunDaemon);
 /// <param name="pipe">Channel key to serve (the Sluice rendezvous name). Defaults to the key derived from the root (clients match it).</param>
 /// <param name="solution">Explicit solution/project override. Defaults to CLAUDE_ROSLYN_SOLUTION, else discovery.</param>
 /// <param name="idleSeconds">Shut down after this long with zero clients.</param>
+/// <param name="requestIdleMin">Shut down after this many minutes with no client request, clients connected or not; 0 = never.</param>
 /// <param name="ct">Wired by ConsoleAppFramework to Ctrl-C / SIGTERM.</param>
 static async Task RunDaemon(
     string? root = null, string? pipe = null, string? solution = null, int idleSeconds = 600,
-    CancellationToken ct = default)
+    int requestIdleMin = 0, CancellationToken ct = default)
 {
     root ??= Directory.GetCurrentDirectory();
     string pipeName = pipe ?? PipeKey.ForRoot(root);
@@ -79,7 +80,7 @@ static async Task RunDaemon(
     using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
     try
     {
-        Log($"daemon starting — root={root} pipe={pipeName} idle={idleSeconds}s");
+        Log($"daemon starting — root={root} pipe={pipeName} idle={idleSeconds}s request-idle={(requestIdleMin > 0 ? requestIdleMin + "m" : "off")}");
         string logDir = Path.Combine(dataDir, "logs");
         string serverDll = await RoslynAcquirer.EnsureServerAsync(dataDir, Log, cts.Token).ConfigureAwait(false);
 
@@ -106,7 +107,8 @@ static async Task RunDaemon(
             onReloaded: () => mux.RefreshDiagnostics(null), // re-publish open docs so the reloaded extension's state surfaces
             ct: cts.Token).ConfigureAwait(false);
 
-        var idle = new IdleShutdown(mux, TimeSpan.FromSeconds(idleSeconds), Log, cts, root);
+        var idle = new IdleShutdown(mux, TimeSpan.FromSeconds(idleSeconds), Log, cts, root,
+            requestIdleMin > 0 ? TimeSpan.FromMinutes(requestIdleMin) : TimeSpan.Zero);
         idle.Start();
 
         // Accept clients until cancelled or the LS dies.
@@ -188,6 +190,12 @@ sealed class IdleShutdown
     /// steady state is well under it), low enough to bound the fleet well below the 17 GB observed.</summary>
     private static readonly long MemoryCeilingBytes = ReadCeilingBytes();
 
+    /// <summary>How long this daemon may go with no client REQUEST before it exits, clients connected or not; Zero = never.
+    /// Set per daemon by whoever SPAWNED it (--request-idle-min): the router's secondary spawn asks for it because a
+    /// secondary's death is handled (the router drops it and reconnects on next use), while a PRIMARY's death makes
+    /// every connected LSP client exit and wait on its host - so a primary never gets one by default.</summary>
+    private readonly TimeSpan RequestIdle;
+
     private static long ReadCeilingBytes()
     {
         var raw = Environment.GetEnvironmentVariable("CLAUDE_ROSLYN_MEMORY_CEILING_GB");
@@ -232,8 +240,8 @@ sealed class IdleShutdown
         catch { return true; }
     }
 
-    public IdleShutdown(LspMultiplexer mux, TimeSpan timeout, Action<string> log, CancellationTokenSource cts, string root)
-    { _mux = mux; _timeout = timeout; _log = log; _cts = cts; _root = root; _mux.ClientCountChanged += () => { if (_mux.ClientCount > 0) _zeroSince = DateTime.MaxValue; else _zeroSince = DateTime.UtcNow; }; }
+    public IdleShutdown(LspMultiplexer mux, TimeSpan timeout, Action<string> log, CancellationTokenSource cts, string root, TimeSpan requestIdle)
+    { RequestIdle = requestIdle; _mux = mux; _timeout = timeout; _log = log; _cts = cts; _root = root; _mux.ClientCountChanged += () => { if (_mux.ClientCount > 0) _zeroSince = DateTime.MaxValue; else _zeroSince = DateTime.UtcNow; }; }
 
     public void Start() => _ = RunAsync();
 
@@ -255,6 +263,20 @@ sealed class IdleShutdown
                 if (_mux.ClientCount == 0 && _zeroSince != DateTime.MaxValue && DateTime.UtcNow - _zeroSince > _timeout)
                 {
                     _log($"idle for {_timeout.TotalSeconds:0}s with no clients — shutting down");
+                    _cts.Cancel();
+                    return;
+                }
+
+                // 🩸 A CONNECTED CLIENT THAT NEVER ASKS ANYTHING MUST NOT PIN 2-5 GB. The check above needs ClientCount to
+                // reach zero, and an MCP session holds its client for the session's whole life - so a daemon started for
+                // a worktree an agent touched once stays loaded for as long as that agent lives. MEASURED 2026-09-23: two
+                // daemons for @rg's per-commit worktrees (rg-commit2 2.5 GB, 22:26; rg-commit3 1.9 GB, 23:30) beside the
+                // main 5.0 GB server, with free memory at 3.9 GB. A daemon that has had no REQUEST for
+                // --request-idle-min minutes exits whoever is connected. Only the ROUTER's secondary spawn passes it
+                // (30), because only a secondary's death is clean: the router drops it and the next touch respawns it.
+                if (RequestIdle > TimeSpan.Zero && DateTime.UtcNow - _mux.LastClientRequestUtc > RequestIdle)
+                {
+                    _log($"no client request for {RequestIdle.TotalMinutes:0} min ({_mux.ClientCount} client(s) connected) — shutting down; the next request respawns this daemon");
                     _cts.Cancel();
                     return;
                 }

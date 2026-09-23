@@ -41,6 +41,10 @@ internal sealed class DaemonRouter : IDisposable
     private readonly ConcurrentDictionary<string, string?> _uriRoot = new(StringComparer.OrdinalIgnoreCase); // uri → foreign root (null = home)
     private readonly ConcurrentDictionary<string, Secondary> _secondaries = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>Minutes a SECONDARY daemon may go without a request before it exits (CRLSP_SECONDARY_REQUEST_IDLE_MIN;
+    /// default 30; 0 disables).</summary>
+    private static readonly int SecondaryRequestIdleMin =
+        int.TryParse(Environment.GetEnvironmentVariable("CRLSP_SECONDARY_REQUEST_IDLE_MIN"), out int m) ? Math.Max(0, m) : 30;
     private readonly bool _multiRepo;            // false → every file stays on the primary (kill-switch), watch still active
 
     // ---- request watchdog --------------------------------------------------------------------------------------------
@@ -227,7 +231,9 @@ internal sealed class DaemonRouter : IDisposable
         {
             string endpoint = PipeKey.ForRoot(sec.Root);
             _log($"multi-repo: connecting secondary daemon for {sec.Root}");
-            IFrameChannel? ch = await DaemonConnector.ConnectAsync(endpoint, sec.Root, null, _pluginRoot, _log, _ct).ConfigureAwait(false);
+            // A secondary asks for a request-idle exit: its death is handled (DropSecondary, reconnect on next use), and without
+            // one a worktree touched once holds a 2-5 GB server for the rest of this session's life (measured 2026-09-23).
+            IFrameChannel? ch = await DaemonConnector.ConnectAsync(endpoint, sec.Root, null, _pluginRoot, _log, _ct, requestIdleMin: SecondaryRequestIdleMin).ConfigureAwait(false);
             if (ch is null)
             {
                 _log($"multi-repo: secondary connect FAILED for {sec.Root} — routing those files to the primary (loose) instead");
