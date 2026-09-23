@@ -24,6 +24,13 @@ internal static class RoslynServer
             CreateNoWindow = true,
         };
         foreach (var a in leadingArgs) psi.ArgumentList.Add(a);
+        // The server package ships System.GC.Server=true. Measured 2026-09-23 on a 32-core box after 9 h serving one
+        // solution: 5.21 GB committed against a 3.40 GB heap (gen2 3.00 GB, 0.40 GB of it fragmentation) - 1.8 GB of
+        // committed-but-empty server-GC budget, the box's single largest resident process. ConserveMemory makes the GC
+        // compact gen2 when fragmentation is high and trims its budgets; server GC keeps the parallel solution load.
+        // An explicit value in the daemon's own environment wins.
+        if (Environment.GetEnvironmentVariable("DOTNET_GCConserveMemory") is null)
+            psi.Environment["DOTNET_GCConserveMemory"] = "7";
         // Roslyn server CLI: stdio transport + a required log directory. logLevel keeps the noise reasonable.
         psi.ArgumentList.Add("--stdio");
         psi.ArgumentList.Add("--logLevel");
