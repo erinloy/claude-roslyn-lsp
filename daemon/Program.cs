@@ -189,6 +189,26 @@ sealed class IdleShutdown
     /// fixed policy. Default 12 GB: high enough that a 345-project workspace loads and serves normally (the measured
     /// steady state is well under it), low enough to bound the fleet well below the 17 GB observed.</summary>
     private static readonly long MemoryCeilingBytes = ReadCeilingBytes();
+    private const long PressureCeilingBytes = 4L * 1024 * 1024 * 1024;
+    private const long PressureFreeBytes = 1536L * 1024 * 1024;
+
+    /// <summary>Available physical memory on the box now (GlobalMemoryStatusEx), or 0 if unreadable or not Windows (0 never trips).</summary>
+    private static long BoxFreeBytes()
+    {
+        if (!OperatingSystem.IsWindows()) return 0;
+        var status = new MemoryStatusEx { Length = (uint)System.Runtime.InteropServices.Marshal.SizeOf<MemoryStatusEx>() };
+        return GlobalMemoryStatusEx(ref status) ? (long)status.AvailPhys : 0;
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct MemoryStatusEx
+    {
+        public uint Length, MemoryLoad;
+        public ulong TotalPhys, AvailPhys, TotalPageFile, AvailPageFile, TotalVirtual, AvailVirtual, AvailExtendedVirtual;
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GlobalMemoryStatusEx(ref MemoryStatusEx buffer);
 
     /// <summary>How long this daemon may go with no client REQUEST before it exits, clients connected or not; Zero = never.
     /// Set per daemon by whoever SPAWNED it (--request-idle-min): the router's secondary spawn asks for it because a
@@ -323,7 +343,9 @@ sealed class IdleShutdown
                 if (MemoryCeilingBytes > 0)
                 {
                     long ws = RoslynWorkingSetBytes();
-                    if (ws > MemoryCeilingBytes)
+                    // A fixed 12 GB cannot judge a box whose free memory swings 0.7-10 GB with fleet load (2026-09-25:
+                    // 715 MB free, this server 5.2 GB). Under box pressure the bound drops to PressureCeilingBytes.
+                    if (ws > MemoryCeilingBytes || (ws > PressureCeilingBytes && BoxFreeBytes() is > 0 and < PressureFreeBytes))
                     {
                         if (_overCeilingSince == DateTime.MaxValue)
                         {
