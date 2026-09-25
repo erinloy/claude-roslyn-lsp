@@ -189,7 +189,8 @@ sealed class IdleShutdown
     /// fixed policy. Default 12 GB: high enough that a 345-project workspace loads and serves normally (the measured
     /// steady state is well under it), low enough to bound the fleet well below the 17 GB observed.</summary>
     private static readonly long MemoryCeilingBytes = ReadCeilingBytes();
-    private const long PressureCeilingBytes = 4L * 1024 * 1024 * 1024;
+    // PRIVATE bytes, not working set: the OS trims WS under exactly this pressure (12:2xZ: private 3.9 GB, WS 3.3 GB, box 0.8 GB free).
+    private const long PressureCeilingBytes = 3L * 1024 * 1024 * 1024;
     private const long PressureFreeBytes = 4096L * 1024 * 1024;   // 2026-09-25 09:4xZ: 3 GB free with a 5.2 GB server and webfrontend paging; 1.5 GB never fired
 
     /// <summary>Available physical memory on the box now (GlobalMemoryStatusEx), or 0 if unreadable or not Windows (0 never trips).</summary>
@@ -238,6 +239,19 @@ sealed class IdleShutdown
         {
             foreach (var p in System.Diagnostics.Process.GetProcessesByName("Microsoft.CodeAnalysis.LanguageServer"))
                 using (p) { if (p.WorkingSet64 > max) max = p.WorkingSet64; }
+        }
+        catch { /* a diagnostic read must never take down the daemon */ }
+        return max;
+    }
+
+    /// <summary>Largest PRIVATE bytes among live Roslyn server processes, or 0 if none/unreadable (never trips).</summary>
+    private static long RoslynPrivateBytes()
+    {
+        long max = 0;
+        try
+        {
+            foreach (var p in System.Diagnostics.Process.GetProcessesByName("Microsoft.CodeAnalysis.LanguageServer"))
+                using (p) { if (p.PrivateMemorySize64 > max) max = p.PrivateMemorySize64; }
         }
         catch { /* a diagnostic read must never take down the daemon */ }
         return max;
@@ -345,7 +359,7 @@ sealed class IdleShutdown
                     long ws = RoslynWorkingSetBytes();
                     // A fixed 12 GB cannot judge a box whose free memory swings 0.7-10 GB with fleet load (2026-09-25:
                     // 715 MB free, this server 5.2 GB). Under box pressure the bound drops to PressureCeilingBytes.
-                    if (ws > MemoryCeilingBytes || (ws > PressureCeilingBytes && BoxFreeBytes() is > 0 and < PressureFreeBytes))
+                    if (ws > MemoryCeilingBytes || (RoslynPrivateBytes() > PressureCeilingBytes && BoxFreeBytes() is > 0 and < PressureFreeBytes))
                     {
                         if (_overCeilingSince == DateTime.MaxValue)
                         {
