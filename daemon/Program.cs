@@ -190,7 +190,7 @@ sealed class IdleShutdown
     /// steady state is well under it), low enough to bound the fleet well below the 17 GB observed.</summary>
     private static readonly long MemoryCeilingBytes = ReadCeilingBytes();
     private const long PressureCeilingBytes = 4L * 1024 * 1024 * 1024;
-    private const long PressureFreeBytes = 1536L * 1024 * 1024;
+    private const long PressureFreeBytes = 4096L * 1024 * 1024;   // 2026-09-25 09:4xZ: 3 GB free with a 5.2 GB server and webfrontend paging; 1.5 GB never fired
 
     /// <summary>Available physical memory on the box now (GlobalMemoryStatusEx), or 0 if unreadable or not Windows (0 never trips).</summary>
     private static long BoxFreeBytes()
