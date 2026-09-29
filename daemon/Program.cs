@@ -359,18 +359,20 @@ sealed class IdleShutdown
                     long ws = RoslynWorkingSetBytes();
                     // A fixed 12 GB cannot judge a box whose free memory swings 0.7-10 GB with fleet load (2026-09-25:
                     // 715 MB free, this server 5.2 GB). Under box pressure the bound drops to PressureCeilingBytes.
-                    if (ws > MemoryCeilingBytes || (RoslynPrivateBytes() > PressureCeilingBytes && BoxFreeBytes() is > 0 and < PressureFreeBytes))
+                    long priv = RoslynPrivateBytes(), free = BoxFreeBytes();
+                    // The log names the rule that fired: 09-29 it said "3.70 GB over the 12.0 GB ceiling" for a pressure recycle.
+                    string why = ws > MemoryCeilingBytes ? $"working set {ws / 1024d / 1024d / 1024d:0.00} GB over the {MemoryCeilingBytes / 1024d / 1024d / 1024d:0.0} GB ceiling"
+                        : $"private {priv / 1024d / 1024d / 1024d:0.00} GB over the {PressureCeilingBytes / 1024d / 1024d / 1024d:0.0} GB pressure bound with the box at {free / 1024d / 1024d / 1024d:0.0} GB free";
+                    if (ws > MemoryCeilingBytes || (priv > PressureCeilingBytes && free is > 0 and < PressureFreeBytes))
                     {
                         if (_overCeilingSince == DateTime.MaxValue)
                         {
                             _overCeilingSince = DateTime.UtcNow;
-                            _log($"Roslyn working set {ws / 1024d / 1024d / 1024d:0.00} GB is over the " +
-                                 $"{MemoryCeilingBytes / 1024d / 1024d / 1024d:0.0} GB ceiling — confirming before recycling");
+                            _log($"Roslyn {why} — confirming before recycling");
                         }
                         else
                         {
-                            _log($"Roslyn working set {ws / 1024d / 1024d / 1024d:0.00} GB over the " +
-                                 $"{MemoryCeilingBytes / 1024d / 1024d / 1024d:0.0} GB ceiling for two consecutive checks " +
+                            _log($"Roslyn {why} for two consecutive checks " +
                                  $"({_mux.ClientCount} client(s) connected) — recycling. This is a BOUND, not a cure: the " +
                                  $"retained state is the union of open documents across clients (see IdleShutdown remarks). " +
                                  $"Tune or disable with CLAUDE_ROSLYN_MEMORY_CEILING_GB.");
