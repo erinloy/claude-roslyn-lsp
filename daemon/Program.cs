@@ -189,28 +189,6 @@ sealed class IdleShutdown
     /// fixed policy. Default 12 GB: high enough that a 345-project workspace loads and serves normally (the measured
     /// steady state is well under it), low enough to bound the fleet well below the 17 GB observed.</summary>
     private static readonly long MemoryCeilingBytes = ReadCeilingBytes();
-    // PRIVATE bytes, not working set: the OS trims WS under exactly this pressure (12:2xZ: private 3.9 GB, WS 3.3 GB, box 0.8 GB free).
-    private const long PressureCeilingBytes = 3L * 1024 * 1024 * 1024;
-    private const long PressureFreeBytes = 4096L * 1024 * 1024;   // 2026-09-25 09:4xZ: 3 GB free with a 5.2 GB server and webfrontend paging; 1.5 GB never fired
-
-    /// <summary>Available physical memory on the box now (GlobalMemoryStatusEx), or 0 if unreadable or not Windows (0 never trips).</summary>
-    private static long BoxFreeBytes()
-    {
-        if (!OperatingSystem.IsWindows()) return 0;
-        var status = new MemoryStatusEx { Length = (uint)System.Runtime.InteropServices.Marshal.SizeOf<MemoryStatusEx>() };
-        return GlobalMemoryStatusEx(ref status) ? (long)status.AvailPhys : 0;
-    }
-
-    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
-    private struct MemoryStatusEx
-    {
-        public uint Length, MemoryLoad;
-        public ulong TotalPhys, AvailPhys, TotalPageFile, AvailPageFile, TotalVirtual, AvailVirtual, AvailExtendedVirtual;
-    }
-
-    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool GlobalMemoryStatusEx(ref MemoryStatusEx buffer);
-
     /// <summary>How long this daemon may go with no client REQUEST before it exits, clients connected or not; Zero = never.
     /// Set per daemon by whoever SPAWNED it (--request-idle-min): the router's secondary spawn asks for it because a
     /// secondary's death is handled (the router drops it and reconnects on next use), while a PRIMARY's death makes
@@ -239,19 +217,6 @@ sealed class IdleShutdown
         {
             foreach (var p in System.Diagnostics.Process.GetProcessesByName("Microsoft.CodeAnalysis.LanguageServer"))
                 using (p) { if (p.WorkingSet64 > max) max = p.WorkingSet64; }
-        }
-        catch { /* a diagnostic read must never take down the daemon */ }
-        return max;
-    }
-
-    /// <summary>Largest PRIVATE bytes among live Roslyn server processes, or 0 if none/unreadable (never trips).</summary>
-    private static long RoslynPrivateBytes()
-    {
-        long max = 0;
-        try
-        {
-            foreach (var p in System.Diagnostics.Process.GetProcessesByName("Microsoft.CodeAnalysis.LanguageServer"))
-                using (p) { if (p.PrivateMemorySize64 > max) max = p.PrivateMemorySize64; }
         }
         catch { /* a diagnostic read must never take down the daemon */ }
         return max;
@@ -357,13 +322,10 @@ sealed class IdleShutdown
                 if (MemoryCeilingBytes > 0)
                 {
                     long ws = RoslynWorkingSetBytes();
-                    // A fixed 12 GB cannot judge a box whose free memory swings 0.7-10 GB with fleet load (2026-09-25:
-                    // 715 MB free, this server 5.2 GB). Under box pressure the bound drops to PressureCeilingBytes.
-                    long priv = RoslynPrivateBytes(), free = BoxFreeBytes();
-                    // The log names the rule that fired: 09-29 it said "3.70 GB over the 12.0 GB ceiling" for a pressure recycle.
-                    string why = ws > MemoryCeilingBytes ? $"working set {ws / 1024d / 1024d / 1024d:0.00} GB over the {MemoryCeilingBytes / 1024d / 1024d / 1024d:0.0} GB ceiling"
-                        : $"private {priv / 1024d / 1024d / 1024d:0.00} GB over the {PressureCeilingBytes / 1024d / 1024d / 1024d:0.0} GB pressure bound with the box at {free / 1024d / 1024d / 1024d:0.0} GB free";
-                    if (ws > MemoryCeilingBytes || (priv > PressureCeilingBytes && free is > 0 and < PressureFreeBytes))
+                    // No box-pressure bound (removed 10-18): a 3 GB bound under 4 GB free fired during every load of the
+                    // 1,200-project solution, so the daemon restarted every few minutes and whole projects never indexed.
+                    string why = $"working set {ws / 1024d / 1024d / 1024d:0.00} GB over the {MemoryCeilingBytes / 1024d / 1024d / 1024d:0.0} GB ceiling";
+                    if (ws > MemoryCeilingBytes)
                     {
                         if (_overCeilingSince == DateTime.MaxValue)
                         {
