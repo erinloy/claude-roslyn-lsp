@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The daemon's thin client as a LIBRARY: the same bridge sources cli and mcp link, for a host that references
+       rather than links them. An app may reference a library; it may not reference the bridge Exe (NETSDK1150). -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>ClaudeRoslynLsp.DaemonClient</AssemblyName>
+    <RootNamespace>ClaudeRoslynLsp.Bridge</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="$(ExternalRoot)/Sluice/src/Sluice/Sluice.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="../bridge/SolutionLocator.cs" Link="SolutionLocator.cs" />
+    <Compile Include="../bridge/PipeKey.cs" Link="PipeKey.cs" />
+    <Compile Include="../bridge/DaemonConnector.cs" Link="DaemonConnector.cs" />
+    <Compile Include="../bridge/RoslynDaemonClient.cs" Link="RoslynDaemonClient.cs" />
+    <Compile Include="../bridge/LspEdits.cs" Link="LspEdits.cs" />
+    <Compile Include="../bridge/RoslynOps.cs" Link="RoslynOps.cs" />
+    <Compile Include="../shared/PluginDataRoot.cs" Link="PluginDataRoot.cs" />
+  </ItemGroup>
+
+</Project>
