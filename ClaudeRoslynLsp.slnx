@@ -35,6 +35,7 @@
     <Platform Name="x64" />
   </Configurations>
   <Project Path="bridge/ClaudeRoslynLsp.Bridge.csproj" />
+  <Project Path="daemon-client/ClaudeRoslynLsp.DaemonClient.csproj" />
   <Project Path="cli/ClaudeRoslynLsp.Cli.csproj" />
   <Project Path="client/ClaudeRoslynLsp.Client.csproj" />
   <Project Path="daemon/ClaudeRoslynLsp.Daemon.csproj" />
