@@ -55,6 +55,11 @@ string? solution = Environment.GetEnvironmentVariable("CLAUDE_ROSLYN_SOLUTION");
 string pluginRoot = Environment.GetEnvironmentVariable("CLAUDE_PLUGIN_ROOT")
     ?? Directory.GetParent(Path.GetDirectoryName(ScriptPath())!)!.FullName;
 
+// Primary daemon request-idle timeout (minutes). 0 = disabled (current behaviour). Override with
+// CRLSP_PRIMARY_REQUEST_IDLE_MIN. Measured 2026-09-23: primary daemons with connected-but-idle clients
+// held 1-5 GB for hours because idleSeconds=600 needs ClientCount=0 and MCP sessions hold clients for life.
+int primaryRequestIdleMin = int.TryParse(Environment.GetEnvironmentVariable("CRLSP_PRIMARY_REQUEST_IDLE_MIN"), out int m) ? Math.Max(0, m) : 0;
+
 // Both are logged because a SHARED key is the whole point: when two sessions expect one daemon and get two, the first
 // question is which root each of them resolved, and a line carrying only the answer cannot say where it came from.
 // 🩸 root == cwd HAS TWO OPPOSITE CAUSES AND THIS LINE USED TO REPORT THEM IDENTICALLY. Either cwd IS an anchor
@@ -92,7 +97,7 @@ Log($"workspace root: {root}"
        : $"  (resolved up from cwd {cwd})"));
 Log($"endpoint: {endpoint}");
 
-IFrameChannel? channel = await DaemonConnector.ConnectAsync(endpoint, root, solution, pluginRoot, Log);
+IFrameChannel? channel = await DaemonConnector.ConnectAsync(endpoint, root, solution, pluginRoot, Log, CancellationToken.None, primaryRequestIdleMin);
 if (channel is null) { Log("FATAL: could not reach the roslyn daemon"); return 1; }
 
 Log("connected to daemon — proxying");
