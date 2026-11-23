@@ -33,6 +33,9 @@ internal sealed class LspMultiplexer
     private readonly ConcurrentDictionary<long, TaskCompletionSource<JsonNode?>> _internalPending = new(); // daemon's own LS requests (diagnostic pulls)
     private readonly ConcurrentDictionary<int, ClientSession> _clients = new();
     private readonly ConcurrentDictionary<string, int> _openDocs = new(StringComparer.Ordinal);
+    // the hash of the text the server holds per open doc: a second opener whose disk text differs replaces it (fyre 11-23)
+    private readonly ConcurrentDictionary<string, string> _serverText = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, int> _unplacedPulls = new(StringComparer.Ordinal);   // re-pulls owed a doc no project holds yet
     private readonly ConcurrentDictionary<string, int> _docVersions = new(StringComparer.Ordinal);          // monotonic didChange version per open doc
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _diagDebounce = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, int> _lastErrorSig = new(StringComparer.Ordinal);            // last errors-only signature published to non-openers, per uri
@@ -146,6 +149,7 @@ internal sealed class LspMultiplexer
                 _openDocs.TryRemove(uri, out _);
                 _lastTouch.TryRemove(uri, out _);
                 _docVersions.TryRemove(uri, out _);
+                _serverText.TryRemove(uri, out _); _unplacedPulls.TryRemove(uri, out _);
                 _lastErrorSig.TryRemove(uri, out _);
                 _lastResultId.TryRemove(uri, out _);   // a re-opened document must not present a token from its previous life
                 if (_diagDebounce.TryRemove(uri, out var cts)) { try { cts.Cancel(); cts.Dispose(); } catch { } }
@@ -392,7 +396,16 @@ internal sealed class LspMultiplexer
         if (method == "textDocument/didOpen")
         {
             int after = _openDocs.AddOrUpdate(uri, 1, (_, c) => c + 1);
-            if (after == 1) await _lsWriter.WriteJsonAsync(json.DeepClone()!, _ct).ConfigureAwait(false);
+            string? text = json["params"]?["textDocument"]?["text"]?.GetValue<string>();
+            if (after == 1)
+            {
+                if (text is not null) _serverText[uri] = TextHash(text);
+                await _lsWriter.WriteJsonAsync(json.DeepClone()!, _ct).ConfigureAwait(false);
+            }
+            // A doc another opener holds keeps the server's buffer from ITS open; a rewrite by Write or a shell since then
+            // is disk the server never saw (nexus 11-23: errors named a parameter no longer in the file). Replace it.
+            else if (text is not null && _serverText.TryGetValue(uri, out string? held) && held != TextHash(text))
+                await ReplaceServerTextAsync(uri, json["params"]?["textDocument"]?["languageId"]?.GetValue<string>() ?? "csharp", text, _ct).ConfigureAwait(false);
         }
         else // didClose
         {
@@ -405,6 +418,7 @@ internal sealed class LspMultiplexer
                 // (a didChange/diagnostic for a closed document is a protocol violation the server may abort on).
                 if (_diagDebounce.TryRemove(uri, out var cts)) { try { cts.Cancel(); cts.Dispose(); } catch { } }
                 _docVersions.TryRemove(uri, out _);
+                _serverText.TryRemove(uri, out _); _unplacedPulls.TryRemove(uri, out _);
                 _lastErrorSig.TryRemove(uri, out _);
                 _lastResultId.TryRemove(uri, out _);   // a reopened document must not present a token from its previous life
                 await _lsWriter.WriteJsonAsync(json.DeepClone()!, _ct).ConfigureAwait(false);
@@ -419,20 +433,36 @@ internal sealed class LspMultiplexer
     // server's open buffer from DISK (the single source of truth — so concurrent agents never diverge), pull the
     // document's diagnostics, and broadcast them to every client as a publishDiagnostics notification.
 
+    /// <summary>Replaces the server's buffer for an open doc with <paramref name="text"/>: didClose then didOpen at the next version
+    /// (this Roslyn build's DidChange NREs on a range-less full change), and records the text's hash as what the server holds.</summary>
+    private async Task ReplaceServerTextAsync(string uri, string langId, string text, CancellationToken ct)
+    {
+        int version = _docVersions.AddOrUpdate(uri, 2, (_, v) => v + 1);
+        await _lsWriter.WriteJsonAsync(Notify("textDocument/didClose",
+            new JsonObject { ["textDocument"] = new JsonObject { ["uri"] = uri } }), ct).ConfigureAwait(false);
+        await _lsWriter.WriteJsonAsync(Notify("textDocument/didOpen", new JsonObject
+        {
+            ["textDocument"] = new JsonObject { ["uri"] = uri, ["languageId"] = langId, ["version"] = version, ["text"] = text },
+        }), ct).ConfigureAwait(false);
+        _serverText[uri] = TextHash(text);
+    }
+
+    private static string TextHash(string text) => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(text)));
+
     private static string? DocUri(JsonNode json) => json["params"]?["textDocument"]?["uri"]?.GetValue<string>();
 
     /// <summary>Debounced diagnostics refresh for a URI — coalesces a burst of edits into one pull+publish.
     /// <paramref name="resyncFromDisk"/> is true ONLY for client edits (didChange/didSave): it re-syncs the server's open
     /// buffer from disk. Refresh- and open-driven pulls pass false — a didChange there would make the server emit another
     /// refresh, looping forever.</summary>
-    private void TriggerDiagnostics(string uri, bool resyncFromDisk)
+    private void TriggerDiagnostics(string uri, bool resyncFromDisk, int delayMs = 150)
     {
         var cts = CancellationTokenSource.CreateLinkedTokenSource(_ct);
         if (_diagDebounce.TryRemove(uri, out var old)) { try { old.Cancel(); old.Dispose(); } catch { } }
         _diagDebounce[uri] = cts;
         _ = Task.Run(async () =>
         {
-            try { await Task.Delay(150, cts.Token).ConfigureAwait(false); }
+            try { await Task.Delay(delayMs, cts.Token).ConfigureAwait(false); }
             catch { return; } // superseded by a newer edit
             try { await PublishDiagnosticsForAsync(uri, resyncFromDisk, cts.Token).ConfigureAwait(false); }
             catch (Exception ex) { _log($"diagnostics publish failed for {uri}: {ex.Message}"); }
@@ -455,13 +485,7 @@ internal sealed class LspMultiplexer
             {
                 string text = File.ReadAllText(path);
                 string langId = path.EndsWith(".vb", StringComparison.OrdinalIgnoreCase) ? "vb" : "csharp";
-                int version = _docVersions.AddOrUpdate(uri, 2, (_, v) => v + 1);
-                await _lsWriter.WriteJsonAsync(Notify("textDocument/didClose",
-                    new JsonObject { ["textDocument"] = new JsonObject { ["uri"] = uri } }), ct).ConfigureAwait(false);
-                await _lsWriter.WriteJsonAsync(Notify("textDocument/didOpen", new JsonObject
-                {
-                    ["textDocument"] = new JsonObject { ["uri"] = uri, ["languageId"] = langId, ["version"] = version, ["text"] = text },
-                }), ct).ConfigureAwait(false);
+                await ReplaceServerTextAsync(uri, langId, text, ct).ConfigureAwait(false);
             }
         }
 
@@ -508,6 +532,16 @@ internal sealed class LspMultiplexer
                    + $"(latest {uri}; these are the resultId cache working, not a fault)");
             return;
         }
+        // A new file is a miscellaneous file until its project's globs are re-read, and that answers syntax only: its empty set
+        // would read as a pass (keystone 11-23: 0 errors, then CS0103). Withhold it and pull again at a doubling step, 8 tries.
+        if (await IsMiscellaneousAsync(uri, ct).ConfigureAwait(false))
+        {
+            int tries = _unplacedPulls.AddOrUpdate(uri, 1, (_, n) => n + 1);
+            if (tries <= 8) TriggerDiagnostics(uri, resyncFromDisk: false, delayMs: 100 << tries);
+            else _log($"diag {uri}: no project took this file after {tries - 1} pulls; its semantic diagnostics stay unpublished");
+            return;
+        }
+        _unplacedPulls.TryRemove(uri, out _);
         JsonArray items = (result!["items"] as JsonArray)?.DeepClone()?.AsArray() ?? new JsonArray();
         await AugmentWithExtensionsAsync(uri, items, ct).ConfigureAwait(false);
         await PublishRoutedAsync(uri, items, resyncFromDisk).ConfigureAwait(false);
@@ -766,6 +800,31 @@ internal sealed class LspMultiplexer
         var p = new JsonObject { ["textDocument"] = td };
         if (_lastResultId.TryGetValue(uri, out string? prev) && !string.IsNullOrEmpty(prev)) p["previousResultId"] = prev;
         return p;
+    }
+
+    /// <summary>True when every project context the server names for the doc is miscellaneous (textDocument/_vs_getProjectContexts).</summary>
+    private async Task<bool> IsMiscellaneousAsync(string uri, CancellationToken ct)
+    {
+        long pid = Interlocked.Increment(ref _nextGlobalId);
+        var tcs = new TaskCompletionSource<JsonNode?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _internalPending[pid] = tcs;
+        await _lsWriter.WriteJsonAsync(new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = pid,
+            ["method"] = "textDocument/_vs_getProjectContexts",
+            ["params"] = new JsonObject { ["_vs_textDocument"] = new JsonObject { ["uri"] = uri } },
+        }, ct).ConfigureAwait(false);
+        JsonNode? res;
+        try { res = await tcs.Task.WaitAsync(TimeSpan.FromSeconds(15), ct).ConfigureAwait(false); }
+        catch (Exception ex)
+        {
+            _internalPending.TryRemove(pid, out _);
+            _log($"placement ask for {uri} failed ({ex.GetType().Name}); its report is published as the server gave it");
+            return false;
+        }
+        return res?["_vs_projectContexts"] is JsonArray contexts && contexts.Count > 0
+            && contexts.All(c => c?["_vs_is_miscellaneous"]?.GetValue<bool>() == true);
     }
 
     private async Task<JsonNode?> PullDiagnosticsOnceAsync(string uri, CancellationToken ct)

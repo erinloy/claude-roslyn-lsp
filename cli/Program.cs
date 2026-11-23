@@ -97,8 +97,10 @@ public sealed class CrlspCommands
     public async Task Diag([Argument] string file, CancellationToken ct)
     {
         await using var c = await Connect(ct);
-        var diags = await RoslynOps.DiagnosticsAsync(c, file, ct);
-        if (diags.Count == 0) { Console.WriteLine($"no diagnostics: {file}"); return; }
+        var report = await RoslynOps.DiagnosticsAsync(c, file, ct);
+        var diags = report.Items;
+        if (report.Withheld is { } why) { Console.WriteLine($"NOT JUDGED: {why}: {file}"); Environment.ExitCode = 3; }
+        if (diags.Count == 0) { if (report.Withheld is null) Console.WriteLine($"no diagnostics: {file}"); return; }
         Console.WriteLine($"diagnostics ({diags.Count}):");
         foreach (var d in diags)
             Console.WriteLine($"  {SevName(d.Severity),-7} :{d.Line}:{d.Col} {d.Code}: {d.Message}");

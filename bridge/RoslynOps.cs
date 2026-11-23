@@ -15,10 +15,14 @@ public static class RoslynOps
     public readonly record struct DocSymbol(string Name, int Kind, int Line, int Col, int Depth);
     public readonly record struct Diag(int Line, int Col, int Severity, string Code, string Message);
 
+    /// <summary>A diagnostics answer. Withheld is set when the server could not judge the file's semantics: a file no project has
+    /// taken yet is a miscellaneous file, which answers syntax only, so "no errors" there is not a pass.</summary>
+    public readonly record struct DiagReport(IReadOnlyList<Diag> Items, string? Withheld);
+
     /// <summary>Pull diagnostics for one document (textDocument/diagnostic — Roslyn serves PULL, not push). Roslyn only
     /// computes diagnostics for OPEN documents, so we didOpen the file's current disk content, pull, then didClose.
     /// Returns the items from a full report; an "unchanged" report (no items) yields an empty list.</summary>
-    public static async Task<IReadOnlyList<Diag>> DiagnosticsAsync(
+    public static async Task<DiagReport> DiagnosticsAsync(
         RoslynDaemonClient client, string file, CancellationToken ct)
     {
         string uri = LspEdits.PathToUri(file);
@@ -30,13 +34,37 @@ public static class RoslynOps
         });
         try
         {
+            string? withheld = await UnplacedAsync(client, uri, ct).ConfigureAwait(false);
             JsonNode? res = await client.RequestAsync("textDocument/diagnostic",
                 new JsonObject { ["textDocument"] = new JsonObject { ["uri"] = uri } }, ct).ConfigureAwait(false);
-            return ParseDiagnostics(res);
+            return new DiagReport(ParseDiagnostics(res), withheld);
         }
         finally
         {
             client.Notify("textDocument/didClose", new JsonObject { ["textDocument"] = new JsonObject { ["uri"] = uri } });
+        }
+    }
+
+    /// <summary>How long a diagnostics ask waits for a project to take a file the server holds as miscellaneous (a new file is
+    /// placed when its project's globs are re-read; on a two-file probe it was placed within 4 s, 11-23).</summary>
+    public static TimeSpan PlacementWait { get; set; } = TimeSpan.FromSeconds(8);
+
+    /// <summary>Null when a project holds the file, else why its semantic diagnostics are withheld. The server sends no notice when a
+    /// project takes a file, so textDocument/_vs_getProjectContexts is asked again at a doubling step until PlacementWait is spent.</summary>
+    private static async Task<string?> UnplacedAsync(RoslynDaemonClient client, string uri, CancellationToken ct)
+    {
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        for (int step = 100; ; step *= 2)
+        {
+            JsonNode? res = await client.RequestAsync("textDocument/_vs_getProjectContexts",
+                new JsonObject { ["_vs_textDocument"] = new JsonObject { ["uri"] = uri } }, ct).ConfigureAwait(false);
+            if (res?["_vs_projectContexts"] is not JsonArray contexts)
+                return "the server did not say which project holds this file (textDocument/_vs_getProjectContexts answered nothing)";
+            if (contexts.Any(c => c?["_vs_is_miscellaneous"]?.GetValue<bool>() != true)) return null;
+            if (started.Elapsed + TimeSpan.FromMilliseconds(step) > PlacementWait)
+                return $"no project holds this file after {started.Elapsed.TotalSeconds:0.0} s (a miscellaneous file reports syntax only), " +
+                       "so semantic errors are not judged and an empty list is not a pass";
+            await Task.Delay(step, ct).ConfigureAwait(false);
         }
     }
 

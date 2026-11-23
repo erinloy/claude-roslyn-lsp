@@ -161,9 +161,11 @@ public sealed class RefactorTools
         CancellationToken ct)
         => Bounded("get_diagnostics", async (client, tk) =>
         {
-            IReadOnlyList<RoslynOps.Diag> diags = await RoslynOps.DiagnosticsAsync(client, filePath, tk).ConfigureAwait(false);
-            if (diags.Count == 0) return $"no diagnostics: {filePath}";
-            var sb = new StringBuilder();
+            RoslynOps.DiagReport report = await RoslynOps.DiagnosticsAsync(client, filePath, tk).ConfigureAwait(false);
+            IReadOnlyList<RoslynOps.Diag> diags = report.Items;
+            string head = report.Withheld is { } why ? $"NOT JUDGED: {why}: {filePath}{Environment.NewLine}" : "";
+            if (diags.Count == 0) return head.Length > 0 ? head : $"no diagnostics: {filePath}";
+            var sb = new StringBuilder(head);
             sb.AppendLine($"diagnostics ({diags.Count}) for {filePath}:");
             foreach (RoslynOps.Diag d in diags)
                 sb.AppendLine($"  {Sev(d.Severity),-7} :{d.Line}:{d.Col} {d.Code}: {d.Message}");

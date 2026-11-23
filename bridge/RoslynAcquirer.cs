@@ -6,7 +6,7 @@ namespace ClaudeRoslynLsp.Bridge;
 
 /// <summary>
 /// Ensures Microsoft's Roslyn language server (<c>Microsoft.CodeAnalysis.LanguageServer.&lt;rid&gt;</c>) is present on the
-/// device, downloading + extracting the per-platform NuGet package from nuget.org on first run and caching it under the
+/// device, downloading + extracting the per-platform NuGet package from the vs-impl feed on first run and caching it under the
 /// plugin data dir. This is the same server the C# Dev Kit runs; acquiring it (rather than shipping a binary) keeps the
 /// plugin source-only and lets it pick up the latest published build.
 /// </summary>
@@ -16,6 +16,8 @@ internal static class RoslynAcquirer
     public const string ServerPathEnvVar = "CLAUDE_ROSLYN_SERVER_PATH"; // point at an already-extracted server dll, skip download
     private const string IdBase = "Microsoft.CodeAnalysis.LanguageServer";
     private const string ServerDll = "Microsoft.CodeAnalysis.LanguageServer.dll";
+    // Roslyn publishes the server to the public vs-impl feed; nuget.org holds one build, 5.0.0-1.25277.114 (fyre 11-23: vs-impl had 5.4.0-2.26179.14).
+    private const string FeedIndex = "https://pkgs.dev.azure.com/azure-public/vside/_packaging/vs-impl/nuget/v3/index.json";
 
     /// <summary>Returns the absolute path to the Roslyn server dll, acquiring it if necessary.</summary>
     public static async Task<string> EnsureServerAsync(string dataDir, Action<string> log, CancellationToken ct)
@@ -59,7 +61,7 @@ internal static class RoslynAcquirer
         }
 
         // 3. Download + extract the nupkg (a zip) into the versioned dir.
-        log($"downloading Roslyn server {id} {version} from nuget.org …");
+        log($"downloading Roslyn server {id} {version} from the vs-impl feed …");
         try
         {
             await DownloadAndExtractAsync(idLower, version!, versionDir, ct).ConfigureAwait(false);
@@ -76,22 +78,32 @@ internal static class RoslynAcquirer
         return extracted;
     }
 
+    /// <summary>The feed's flat-container address, read from its service index (the address carries feed ids, not the feed's name).</summary>
+    private static async Task<string> PackageBaseAsync(HttpClient http, CancellationToken ct)
+    {
+        string json = await http.GetStringAsync(FeedIndex, ct).ConfigureAwait(false);
+        string? at = JsonNode.Parse(json)?["resources"]?.AsArray()
+            .FirstOrDefault(r => r?["@type"]?.GetValue<string>().StartsWith("PackageBaseAddress", StringComparison.Ordinal) == true)?["@id"]?.GetValue<string>();
+        return at ?? throw new InvalidOperationException($"{FeedIndex} names no PackageBaseAddress");
+    }
+
     private static async Task<string> ResolveLatestVersionAsync(string idLower, CancellationToken ct)
     {
         using var http = NewHttp();
         // NuGet flat-container version index — versions ascending; the last is the newest published (incl. prerelease).
-        string url = $"https://api.nuget.org/v3-flatcontainer/{idLower}/index.json";
+        string url = $"{await PackageBaseAsync(http, ct).ConfigureAwait(false)}{idLower}/index.json";
         string json = await http.GetStringAsync(url, ct).ConfigureAwait(false);
-        var versions = JsonNode.Parse(json)?["versions"]?.AsArray();
+        var versions = JsonNode.Parse(json)?["versions"]?.AsArray().Select(v => v!.GetValue<string>()).ToList();
         if (versions is null || versions.Count == 0)
             throw new InvalidOperationException($"no versions listed for {idLower}");
-        return versions[^1]!.GetValue<string>();
+        // the feed lists versions in publish order, not version order: its last entry was a 4.8.0 build
+        return versions.MaxBy(SemVerKey.Of)!;
     }
 
     private static async Task DownloadAndExtractAsync(string idLower, string version, string versionDir, CancellationToken ct)
     {
         using var http = NewHttp();
-        string url = $"https://api.nuget.org/v3-flatcontainer/{idLower}/{version}/{idLower}.{version}.nupkg";
+        string url = $"{await PackageBaseAsync(http, ct).ConfigureAwait(false)}{idLower}/{version}/{idLower}.{version}.nupkg";
         // The download lands BESIDE its destination, inside the plugin data root — never Path.GetTempPath(), which on
         // Windows is %LOCALAPPDATA%\Temp (Erin, 2026-09-17: no plugin state in AppData). Same directory as the
         // extraction also means the same volume, and the finally below removes it whether or not extraction succeeds.
@@ -170,5 +182,35 @@ internal static class RoslynAcquirer
             _ => "x64",
         };
         return $"{os}-{arch}";
+    }
+}
+
+/// <summary>SemVer 2 precedence: numeric core, then a release above any prerelease, then prerelease identifiers in turn (a
+/// numeric one below an alphanumeric one, numerics by value).</summary>
+internal readonly record struct SemVerKey(int[] Core, string[]? Pre) : IComparable<SemVerKey>
+{
+    public static SemVerKey Of(string v)
+    {
+        string bare = v.Split('+')[0];
+        int dash = bare.IndexOf('-');
+        string core = dash < 0 ? bare : bare[..dash];
+        return new(core.Split('.').Select(int.Parse).ToArray(), dash < 0 ? null : bare[(dash + 1)..].Split('.'));
+    }
+
+    public int CompareTo(SemVerKey other)
+    {
+        for (int i = 0; i < Math.Max(Core.Length, other.Core.Length); i++)
+        {
+            int c = (i < Core.Length ? Core[i] : 0).CompareTo(i < other.Core.Length ? other.Core[i] : 0);
+            if (c != 0) return c;
+        }
+        if (Pre is null || other.Pre is null) return (Pre is null).CompareTo(other.Pre is null);
+        for (int i = 0; i < Math.Min(Pre.Length, other.Pre.Length); i++)
+        {
+            bool an = long.TryParse(Pre[i], out long a), bn = long.TryParse(other.Pre[i], out long b);
+            int c = an && bn ? a.CompareTo(b) : an != bn ? (an ? -1 : 1) : string.CompareOrdinal(Pre[i], other.Pre[i]);
+            if (c != 0) return c;
+        }
+        return Pre.Length.CompareTo(other.Pre.Length);
     }
 }
